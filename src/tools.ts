@@ -36,6 +36,30 @@ export const DeleteEmailSchema = z.object({
   messageId: z.string().describe("ID of the email message to delete"),
 });
 
+// Draft lifecycle schemas
+export const SendDraftSchema = z.object({
+  draftId: z.string().describe("ID of the draft to send (returned by draft_email)"),
+});
+
+export const DeleteDraftSchema = z.object({
+  draftId: z.string().describe("ID of the draft to delete"),
+});
+
+export const UpdateDraftSchema = z.object({
+  draftId: z.string().describe("ID of the draft to update"),
+  to: z.array(z.string()).describe("List of recipient email addresses"),
+  subject: z.string().describe("Email subject"),
+  body: z.string().describe("Email body content (used for text/plain or when htmlBody not provided)"),
+  from: z.string().optional().describe("Sender email address (must be a configured send-as alias in Gmail settings). Defaults to account's default send-as address if not specified."),
+  htmlBody: z.string().optional().describe("HTML version of the email body"),
+  mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
+  cc: z.array(z.string()).optional().describe("List of CC recipients"),
+  bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
+  threadId: z.string().optional().describe("Thread ID to reply to"),
+  inReplyTo: z.string().optional().describe("Message ID being replied to"),
+  attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
+});
+
 export const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
 
 export const CreateLabelSchema = z.object({
@@ -256,6 +280,27 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: SendEmailSchema,
     scopes: ["gmail.modify", "gmail.compose"],
     annotations: { title: "Draft Email", destructiveHint: false },
+  },
+  {
+    name: "send_draft",
+    description: "Sends an existing draft (created via draft_email) and atomically removes it from Drafts. Prefer this over send_email when you've previously created a draft for review — avoids leaving an orphan draft in the user's Drafts folder.",
+    schema: SendDraftSchema,
+    scopes: ["gmail.modify", "gmail.compose", "gmail.send"],
+    annotations: { title: "Send Draft", destructiveHint: false },
+  },
+  {
+    name: "delete_draft",
+    description: "Deletes a draft. Use to discard an abandoned or superseded draft.",
+    schema: DeleteDraftSchema,
+    scopes: ["gmail.modify", "gmail.compose"],
+    annotations: { title: "Delete Draft", destructiveHint: true },
+  },
+  {
+    name: "update_draft",
+    description: "Replaces the content of an existing draft. Use during iteration (\"change this and that\") instead of creating a new draft each time — avoids accumulating draft copies in the user's Drafts folder.",
+    schema: UpdateDraftSchema,
+    scopes: ["gmail.modify", "gmail.compose"],
+    annotations: { title: "Update Draft", destructiveHint: false },
   },
   {
     name: "modify_email",

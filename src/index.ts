@@ -19,7 +19,7 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -729,6 +729,74 @@ async function main() {
                             {
                                 type: "text",
                                 text: `Email ${validatedArgs.messageId} deleted successfully`,
+                            },
+                        ],
+                    };
+                }
+
+                case "send_draft": {
+                    const validatedArgs = SendDraftSchema.parse(args);
+                    const response = await gmail.users.drafts.send({
+                        userId: 'me',
+                        requestBody: { id: validatedArgs.draftId },
+                    });
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Draft ${validatedArgs.draftId} sent successfully as message ID: ${response.data.id}. The draft has been removed from Drafts.`,
+                            },
+                        ],
+                    };
+                }
+
+                case "delete_draft": {
+                    const validatedArgs = DeleteDraftSchema.parse(args);
+                    await gmail.users.drafts.delete({
+                        userId: 'me',
+                        id: validatedArgs.draftId,
+                    });
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Draft ${validatedArgs.draftId} deleted successfully.`,
+                            },
+                        ],
+                    };
+                }
+
+                case "update_draft": {
+                    const validatedArgs = UpdateDraftSchema.parse(args);
+                    const { draftId, ...messageArgs } = validatedArgs;
+
+                    // Build the new MIME message using the same helpers as draft_email/send_email
+                    let message: string;
+                    if (messageArgs.attachments && messageArgs.attachments.length > 0) {
+                        message = await createEmailWithNodemailer(messageArgs);
+                    } else {
+                        message = createEmailMessage(messageArgs);
+                    }
+
+                    const encodedMessage = Buffer.from(message).toString('base64')
+                        .replace(/\+/g, '-')
+                        .replace(/\//g, '_')
+                        .replace(/=+$/, '');
+
+                    const messageRequest: any = { raw: encodedMessage };
+                    if (messageArgs.threadId) messageRequest.threadId = messageArgs.threadId;
+
+                    const response = await gmail.users.drafts.update({
+                        userId: 'me',
+                        id: draftId,
+                        requestBody: { message: messageRequest },
+                    });
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Draft ${draftId} updated successfully (draft ID unchanged, content replaced).`,
                             },
                         ],
                     };
