@@ -28,6 +28,7 @@ const mockHeaders = [
   { name: "From", value: "Alice <alice@example.com>" },
   { name: "To", value: "Bob <bob@example.com>, Carol <carol@example.com>" },
   { name: "Cc", value: "dave@example.com" },
+  { name: "Bcc", value: "eve@example.com" },
   { name: "Subject", value: "Test Email Subject" },
   { name: "Date", value: "Fri, 13 Mar 2026 10:00:00 +0000" },
   { name: "Message-ID", value: "<msg123@example.com>" },
@@ -256,7 +257,7 @@ describe("extractHeaders refactor - source verification", () => {
 
   it("read_email uses extractHeaders (not inline header extraction)", () => {
     // The read_email case should use destructured extractHeaders call
-    expect(indexSource).toContain("const { subject, from, to, date, rfcMessageId } = extractHeaders(");
+    expect(indexSource).toContain("const { subject, from, to, cc, bcc, date, rfcMessageId } = extractHeaders(");
   });
 
   it("download_email uses extractHeaders", () => {
@@ -307,5 +308,40 @@ describe("email-export parseEmailAddresses", () => {
 
   it("handles undefined", () => {
     expect(parseEmailAddresses(undefined)).toEqual([]);
+  });
+});
+
+
+// ─────────────────────────────────────────────
+// extractHeaders CC/BCC support
+// ─────────────────────────────────────────────
+describe("extractHeaders CC/BCC", () => {
+  // extractHeaders is not exported, so we verify via source inspection
+  const indexSource = fs.readFileSync(path.join(__dirname, "index.ts"), "utf-8");
+
+  it("extractHeaders returns cc and bcc fields in its return type", () => {
+    expect(indexSource).toContain("cc: getHeader(\"cc\")");
+    expect(indexSource).toContain("bcc: getHeader(\"bcc\")");
+  });
+
+  it("extractHeaders return type includes cc and bcc", () => {
+    // Verify the type annotation includes cc and bcc
+    expect(indexSource).toMatch(/function extractHeaders.*cc: string.*bcc: string/);
+  });
+
+  it("read_email output includes CC conditionally", () => {
+    // The template should conditionally include CC
+    expect(indexSource).toContain("CC: ${cc}");
+  });
+
+  it("read_email output includes BCC conditionally", () => {
+    // The template should conditionally include BCC
+    expect(indexSource).toContain("BCC: ${bcc}");
+  });
+
+  it("CC and BCC lines are conditional (not always shown)", () => {
+    // Verify the conditional pattern - only show when value exists
+    expect(indexSource).toContain("${cc ? `\\nCC: ${cc}` : ''}");
+    expect(indexSource).toContain("${bcc ? `\\nBCC: ${bcc}` : ''}");
   });
 });

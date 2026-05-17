@@ -19,7 +19,7 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -92,7 +92,7 @@ function extractEmailContent(messagePart: GmailMessagePart): EmailContent {
 /**
  * Extract common headers from Gmail message payload
  */
-function extractHeaders(payload: any): { subject: string; from: string; to: string; date: string; rfcMessageId: string } {
+function extractHeaders(payload: any): { subject: string; from: string; to: string; cc: string; bcc: string; date: string; rfcMessageId: string } {
     const headers = payload?.headers || [];
     const getHeader = (name: string) =>
         headers.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
@@ -100,6 +100,8 @@ function extractHeaders(payload: any): { subject: string; from: string; to: stri
         subject: getHeader("subject"),
         from: getHeader("from"),
         to: getHeader("to"),
+        cc: getHeader("cc"),
+        bcc: getHeader("bcc"),
         date: getHeader("date"),
         rfcMessageId: getHeader("message-id"),
     };
@@ -535,7 +537,7 @@ async function main() {
                         format: 'full',
                     });
 
-                    const { subject, from, to, date, rfcMessageId } = extractHeaders(response.data.payload);
+                    const { subject, from, to, cc, bcc, date, rfcMessageId } = extractHeaders(response.data.payload);
                     const threadId = response.data.threadId || '';
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
                     const attachments = extractAttachments(response.data.payload as GmailMessagePart);
@@ -554,7 +556,7 @@ async function main() {
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}${cc ? `\nCC: ${cc}` : ''}${bcc ? `\nBCC: ${bcc}` : ''}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
                             },
                         ],
                     };
@@ -863,6 +865,72 @@ async function main() {
                     let resultText = `Batch label modification complete.\n`;
                     resultText += `Successfully processed: ${successCount} messages\n`;
                     
+                    if (failureCount > 0) {
+                        resultText += `Failed to process: ${failureCount} messages\n\n`;
+                        resultText += `Failed message IDs:\n`;
+                        resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${f.error.message})`).join('\n');
+                    }
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: resultText,
+                            },
+                        ],
+                    };
+                }
+
+                case "report_phishing": {
+                    const validatedArgs = ReportPhishingSchema.parse(args);
+
+                    await gmail.users.messages.modify({
+                        userId: 'me',
+                        id: validatedArgs.messageId,
+                        requestBody: {
+                            addLabelIds: ['SPAM'],
+                        },
+                    });
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Email ${validatedArgs.messageId} was updated with the SPAM label as the closest public Gmail API approximation of reporting phishing. Note: the Gmail API does not expose the full native Report phishing workflow.`,
+                            },
+                        ],
+                    };
+                }
+
+                case "batch_report_phishing": {
+                    const validatedArgs = BatchReportPhishingSchema.parse(args);
+                    const messageIds = validatedArgs.messageIds;
+                    const batchSize = validatedArgs.batchSize || 50;
+
+                    const { successes, failures } = await processBatches(
+                        messageIds,
+                        batchSize,
+                        async (batch) => {
+                            await gmail.users.messages.batchModify({
+                                userId: 'me',
+                                requestBody: {
+                                    ids: batch,
+                                    addLabelIds: ['SPAM'],
+                                },
+                            });
+
+                            return batch.map((messageId) => ({ messageId, success: true }));
+                        }
+                    );
+
+                    const successCount = successes.length;
+                    const failureCount = failures.length;
+
+                    let resultText = `Batch phishing report complete.\n`;
+                    resultText += `Successfully processed: ${successCount} messages\n`;
+                    resultText += `Behavior: each message was updated with the SPAM label as the closest public Gmail API approximation of reporting phishing.\n`;
+                    resultText += `Limitation: the Gmail API does not expose the full native Report phishing workflow.\n`;
+
                     if (failureCount > 0) {
                         resultText += `Failed to process: ${failureCount} messages\n\n`;
                         resultText += `Failed message IDs:\n`;

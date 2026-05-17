@@ -92,6 +92,15 @@ export const BatchModifyEmailsSchema = z.object({
   batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
 });
 
+export const ReportPhishingSchema = z.object({
+  messageId: z.string().describe("ID of the email message to report as phishing"),
+}).describe("Reports a message as phishing using the closest public Gmail API behavior by applying the SPAM label");
+
+export const BatchReportPhishingSchema = z.object({
+  messageIds: z.array(z.string()).describe("List of message IDs to report as phishing"),
+  batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
+}).describe("Reports multiple messages as phishing using the closest public Gmail API behavior by applying the SPAM label");
+
 export const BatchDeleteEmailsSchema = z.object({
   messageIds: z.array(z.string()).describe("List of message IDs to delete"),
   batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
@@ -322,6 +331,20 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: BatchModifyEmailsSchema,
     scopes: ["gmail.modify"],
     annotations: { title: "Batch Modify Emails", destructiveHint: true, idempotentHint: true },
+  },
+  {
+    name: "report_phishing",
+    description: "Reports a message as phishing using the closest public Gmail API behavior by applying the SPAM label",
+    schema: ReportPhishingSchema,
+    scopes: ["gmail.modify"],
+    annotations: { title: "Report Phishing", destructiveHint: true, idempotentHint: true },
+  },
+  {
+    name: "batch_report_phishing",
+    description: "Reports multiple messages as phishing using the closest public Gmail API behavior by applying the SPAM label",
+    schema: BatchReportPhishingSchema,
+    scopes: ["gmail.modify"],
+    annotations: { title: "Batch Report Phishing", destructiveHint: true, idempotentHint: true },
   },
   {
     name: "batch_delete_emails",

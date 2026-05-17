@@ -18,7 +18,9 @@
 - **CI/CD hardening** — fixed shell injection vector in GitHub Actions workflow, added least-privilege permissions scope ([PR #9](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/9) by [@JF10R](https://github.com/JF10R))
 - **Security hardening** — fixed path traversal in attachment download, restricted OAuth credential file permissions ([PR #10](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/10) by [@JF10R](https://github.com/JF10R))
 - **Dependency security** — upgraded MCP SDK to v1.27.1 (3 CVE fixes), upgraded nodemailer (DoS + routing fix), moved dev-only packages out of production deps ([PR #11](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/11) by [@JF10R](https://github.com/JF10R))
-- **Thread-level tools** — `get_thread`, `list_inbox_threads`, `get_inbox_with_threads` for efficient thread-based email reading in a single call
+- **Thread-level tools** — `get_thread`, `list_inbox_threads`, `get_inbox_with_threads`, `modify_thread` for efficient thread-based email operations in a single call
+- **CC/BCC visibility** — `read_email` now shows CC and BCC headers when present ([PR #21](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/21) by [@panghy](https://github.com/panghy))
+- **Phishing report tools** — `report_phishing` and `batch_report_phishing` for marking messages as spam via the Gmail API ([PR #24](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/24) by [@ShivamB25](https://github.com/ShivamB25))
 - **Tool annotations** — MCP spec annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on all tools for safer LLM tool execution ([PR #14](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/14) by [@bryankthompson](https://github.com/bryankthompson))
 - **Download email tool** — `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
 
@@ -59,7 +61,19 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 
 ## Installation & Authentication
 
-### Installing Manually
+### Installing from this fork
+
+```bash
+git clone https://github.com/ArtyMcLabin/Gmail-MCP-Server.git
+cd Gmail-MCP-Server
+npm install
+npm run build
+```
+
+> **Note**: The `npx @gongrzhe/server-gmail-autoauth-mcp` commands found in older docs reference the [unmaintained upstream fork](https://github.com/GongRzhe/Gmail-MCP-Server). To use **this** fork's features, install from source as shown above.
+
+### Setting up Google Cloud credentials
+
 1. Create a Google Cloud Project and obtain credentials:
 
    a. Create a Google Cloud Project:
@@ -87,14 +101,14 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
    mv gcp-oauth.keys.json ~/.gmail-mcp/
 
    # Run authentication from anywhere
-   npx @gongrzhe/server-gmail-autoauth-mcp auth
+   node dist/index.js auth
    ```
 
    b. Local Authentication:
    ```bash
    # Place gcp-oauth.keys.json in your current directory
    # The file will be automatically copied to global config
-   npx @gongrzhe/server-gmail-autoauth-mcp auth
+   node dist/index.js auth
    ```
 
    The authentication process will:
@@ -114,9 +128,9 @@ A Model Context Protocol (MCP) server for Gmail integration in Claude Desktop wi
 {
   "mcpServers": {
     "gmail": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "@gongrzhe/server-gmail-autoauth-mcp"
+        "/absolute/path/to/Gmail-MCP-Server/dist/index.js"
       ]
     }
   }
@@ -164,7 +178,7 @@ docker run -i --rm \
 For cloud server environments (like n8n), you can specify a custom callback URL during authentication:
 
 ```bash
-npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2callback
+node dist/index.js auth https://gmail.gongrzhe.com/oauth2callback
 ```
 
 #### Setup Instructions for Cloud Environment
@@ -181,7 +195,7 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2ca
 
 4. **Run Authentication:**
    ```bash
-   npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2callback
+   node dist/index.js auth https://gmail.gongrzhe.com/oauth2callback
    ```
 
 5. **Configure in your application:**
@@ -189,9 +203,9 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth https://gmail.gongrzhe.com/oauth2ca
    {
      "mcpServers": {
        "gmail": {
-         "command": "npx",
+         "command": "node",
          "args": [
-           "@gongrzhe/server-gmail-autoauth-mcp"
+           "/absolute/path/to/Gmail-MCP-Server/dist/index.js"
          ]
        }
      }
@@ -223,13 +237,13 @@ Use the `--scopes` flag to request only the permissions you need:
 
 ```bash
 # Read-only access (recommended for safe browsing)
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.readonly
+node dist/index.js auth --scopes=gmail.readonly
 
 # Read-only with filter management
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.readonly,gmail.settings.basic
+node dist/index.js auth --scopes=gmail.readonly,gmail.settings.basic
 
 # Full access (default behavior)
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.settings.basic
+node dist/index.js auth --scopes=gmail.modify,gmail.settings.basic
 ```
 
 If no `--scopes` flag is provided, the server defaults to `gmail.modify,gmail.settings.basic` for full functionality.
@@ -243,7 +257,7 @@ The server automatically filters available tools based on your authorized scopes
 | `read_email`, `search_emails`, `download_attachment` | `gmail.readonly` or `gmail.modify` |
 | `list_email_labels` | `gmail.readonly`, `gmail.modify`, or `gmail.labels` |
 | `send_email`, `draft_email`, `reply_all` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
-| `modify_email`, `delete_email`, `batch_modify_emails`, `batch_delete_emails` | `gmail.modify` |
+| `modify_email`, `delete_email`, `batch_modify_emails`, `batch_delete_emails`, `modify_thread`, `report_phishing`, `batch_report_phishing` | `gmail.modify` |
 | `create_label`, `update_label`, `delete_label`, `get_or_create_label` | `gmail.modify` or `gmail.labels` |
 | `list_filters`, `get_filter`, `create_filter`, `delete_filter`, `create_filter_from_template` | `gmail.settings.basic` |
 
@@ -260,7 +274,7 @@ To use this MCP server with [Claude Code](https://docs.anthropic.com/en/docs/cla
 First, authenticate with read-only scope:
 
 ```bash
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.readonly
+node dist/index.js auth --scopes=gmail.readonly
 ```
 
 Then add to your Claude Code MCP settings (`~/.claude/mcp_settings.json` or project-level `.mcp.json`):
@@ -270,7 +284,7 @@ Then add to your Claude Code MCP settings (`~/.claude/mcp_settings.json` or proj
   "mcpServers": {
     "gmail": {
       "command": "npx",
-      "args": ["@gongrzhe/server-gmail-autoauth-mcp"]
+      "args": ["/absolute/path/to/Gmail-MCP-Server/dist/index.js"]
     }
   }
 }
@@ -287,7 +301,7 @@ With read-only scopes, only these 4 tools will be available to Claude:
 For full Gmail management capabilities:
 
 ```bash
-npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.settings.basic
+node dist/index.js auth --scopes=gmail.modify,gmail.settings.basic
 ```
 
 ```json
@@ -295,13 +309,13 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.setting
   "mcpServers": {
     "gmail": {
       "command": "npx",
-      "args": ["@gongrzhe/server-gmail-autoauth-mcp"]
+      "args": ["/absolute/path/to/Gmail-MCP-Server/dist/index.js"]
     }
   }
 }
 ```
 
-This enables all 20 tools including sending emails, managing labels, creating filters, reply-all, and batch operations.
+This enables all 23 tools including sending emails, managing labels, creating filters, reply-all, thread operations, phishing reports, and batch operations.
 
 ## Available Tools
 
@@ -380,11 +394,12 @@ Retrieves the content of a specific email by its ID. **Now shows enhanced attach
 }
 ```
 
-**Enhanced Response includes attachment details:**
+**Enhanced Response includes CC/BCC headers (when present) and attachment details:**
 ```
 Subject: Project Files
 From: sender@example.com
 To: recipient@example.com
+CC: colleague@example.com
 Date: Thu, 19 Jun 2025 10:30:00 -0400
 
 Email body content here...
@@ -604,6 +619,38 @@ Parameters:
 - `htmlBody` (optional): HTML version of the reply body
 - `mimeType` (optional): `text/plain` (default), `text/html`, or `multipart/alternative`
 - `attachments` (optional): Array of file paths to attach
+
+### 21. Modify Thread (`modify_thread`)
+Atomically modifies labels on an entire thread (all messages at once). Solves the problem where archiving only the latest message leaves older messages in the inbox.
+
+```json
+{
+  "threadId": "182ab45cd67ef",
+  "addLabelIds": ["IMPORTANT"],
+  "removeLabelIds": ["INBOX"]
+}
+```
+
+### 22. Report Phishing (`report_phishing`)
+Reports a message as phishing using the closest public Gmail API behavior by applying the SPAM label.
+
+```json
+{
+  "messageId": "182ab45cd67ef"
+}
+```
+
+> **Note**: The Gmail API does not expose the full native "Report phishing" workflow. This tool applies the SPAM label as the closest available approximation.
+
+### 23. Batch Report Phishing (`batch_report_phishing`)
+Reports multiple messages as phishing in efficient batches.
+
+```json
+{
+  "messageIds": ["182ab45cd67ef", "182ab45cd67eg", "182ab45cd67eh"],
+  "batchSize": 50
+}
+```
 
 ## Filter Management Features
 
