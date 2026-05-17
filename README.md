@@ -980,6 +980,26 @@ The server includes efficient batch processing capabilities:
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+### Branch workflow
+
+This repo uses a **two-branch model**:
+
+- **`main`** — stable. Only receives changes promoted from `experimental` after they're confirmed working. PRs are **never** merged directly into `main`.
+- **`experimental`** — staging / active development. All PRs are retargeted here and merged into `experimental` first.
+
+Lifecycle of a contribution:
+
+```
+PR opened (any base)
+  → retargeted to `experimental`
+  → security audit + review + CI
+  → merged into `experimental`
+  → soak / verify on experimental
+  → `experimental` promoted to `main` (maintainer confirms)
+```
+
+Open your PR against `experimental` when possible. If you target `main`, a maintainer will retarget it to `experimental` before merge.
+
 **CI requires README updates** — every push to `main` and every PR must include a README.md change (even a version bump or changelog entry). This ensures documentation stays current as the codebase evolves.
 
 To bypass for commits that genuinely don't need a docs update (dependency bumps, CI config changes), include `[skip-readme]` or `[no-readme]` in your commit message or PR title.
