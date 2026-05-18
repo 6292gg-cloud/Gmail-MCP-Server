@@ -8,11 +8,11 @@
 >
 > **Pull requests are welcome.** If you've been sitting on fixes or features with nowhere to submit them, this is the place.
 
-## Two Forks, Two Philosophies
+## Philosophy
 
-This fork is **lean and pragmatic**. It's a local stdio MCP server — you run it on your own machine, and your LLM client already has shell + filesystem access. So the threat model is "don't leak credentials to third parties, don't break the Gmail surface" — not "defend a hosted multi-tenant service". I keep dependencies minimal and CI light. I use this daily in my own Claude Code workflow — if I wouldn't run it or maintain it myself, it doesn't go in.
+This fork is **lean and pragmatic**. It's a local stdio MCP server — you run it on your own machine, and your LLM client already has shell + filesystem access. So the threat model is "don't leak credentials to third parties, don't break the Gmail surface" — not "defend a hosted multi-tenant service". I keep dependencies minimal. I use this daily in my own Claude Code workflow — if I wouldn't run it or maintain it myself, it doesn't go in.
 
-There's a downstream fork — **[klodr/gmail-mcp](https://github.com/klodr/gmail-mcp)** — that took this in the **maximalist** direction: heavy CI/CD, supply-chain tooling, CodeQL, OpenSSF scorecards, npm-published package, modular rearchitecture, AI-gated PR pipeline, big test suite. I'm not affiliated with its maintainer and I don't track its security or features — use it at your own risk. If that's the philosophy you want, go check it out. PRs welcome here as always.
+There's a downstream fork that took this in the **maximalist** direction. I'm not affiliated with its maintainer and I don't track its security or features — use it at your own risk: **[klodr/gmail-mcp](https://github.com/klodr/gmail-mcp)**. If that's the philosophy you want, go check it out. PRs welcome here as always.
 
 ### What this fork adds
 
