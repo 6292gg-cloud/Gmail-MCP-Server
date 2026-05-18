@@ -8,14 +8,11 @@
 >
 > **Pull requests are welcome.** If you've been sitting on fixes or features with nowhere to submit them, this is the place.
 
-## two forks, two philosophies
+## Two Forks, Two Philosophies
 
-this fork is **lean and pragmatic**. it's a local stdio MCP server — you run it on your own machine, and your LLM client already has shell + filesystem access. so the threat model is "don't leak credentials to third parties, don't break the gmail surface" — not "defend a hosted multi-tenant service". i keep dependencies minimal, CI light, and i merge community PRs fast. i use this daily in my own Claude Code workflow — if i wouldn't run it or maintain it myself, it doesn't go in.
+This fork is **lean and pragmatic**. It's a local stdio MCP server — you run it on your own machine, and your LLM client already has shell + filesystem access. So the threat model is "don't leak credentials to third parties, don't break the Gmail surface" — not "defend a hosted multi-tenant service". I keep dependencies minimal and CI light. I use this daily in my own Claude Code workflow — if I wouldn't run it or maintain it myself, it doesn't go in.
 
-there's a downstream fork — **[klodr/gmail-mcp](https://github.com/klodr/gmail-mcp)** — that took this in the **maximalist** direction: heavy CI/CD, supply-chain tooling, CodeQL, OpenSSF scorecards, npm-published package, modular rearchitecture, AI-gated PR pipeline, big test suite. if that's the philosophy you want, go check it out.
-
-> [!NOTE]
-> disclaimer: i don't personally use klodr's fork and i don't track its development. i can't vouch for it, review it, or support it — it's just a different take that exists and is actively maintained by someone else. pointing at it so you can pick what fits you. PRs welcome here as always.
+There's a downstream fork — **[klodr/gmail-mcp](https://github.com/klodr/gmail-mcp)** — that took this in the **maximalist** direction: heavy CI/CD, supply-chain tooling, CodeQL, OpenSSF scorecards, npm-published package, modular rearchitecture, AI-gated PR pipeline, big test suite. I'm not affiliated with its maintainer and I don't track its security or features — use it at your own risk. If that's the philosophy you want, go check it out. PRs welcome here as always.
 
 ### What this fork adds
 
