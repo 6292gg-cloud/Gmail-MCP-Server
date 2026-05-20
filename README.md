@@ -327,6 +327,29 @@ node dist/index.js auth --scopes=gmail.modify,gmail.settings.basic
 
 This enables all 23 tools including sending emails, managing labels, creating filters, reply-all, thread operations, phishing reports, and batch operations.
 
+### Running multiple instances (tool-name prefix)
+
+Some MCP clients dedupe tool entries by their base name across servers, which makes it impossible to run two instances of this server side-by-side (e.g. one for a personal account and one for a shared inbox) — only one instance's tools surface, even though both servers report as connected.
+
+The server accepts an optional `--tool-prefix=<value>` CLI flag (or `GMAIL_MCP_TOOL_PREFIX` env var) that is prepended to every tool name at registration. Default is empty (fully backward-compatible).
+
+Example: register two instances with distinct prefixes in Claude Code:
+
+```bash
+# Personal account
+claude mcp add gmail-personal -s user \
+  -e GMAIL_CREDENTIALS_PATH=$HOME/.gmail-mcp/credentials-personal.json \
+  -- node /absolute/path/to/Gmail-MCP-Server/dist/index.js --tool-prefix=personal_
+
+# Shared inbox
+claude mcp add gmail-info -s user \
+  -- node /absolute/path/to/Gmail-MCP-Server/dist/index.js --tool-prefix=info_
+```
+
+Tools then surface as `mcp__gmail-personal__personal_search_emails`, `mcp__gmail-info__info_search_emails`, etc. — distinct at every layer. The dispatch handler strips the prefix and looks up the resolved name via `getToolByName`; only strips when the result is a known tool (so a prefix value that overlaps a real tool name cannot cause silent mis-dispatch).
+
+The `auth` subcommand runs before the server starts and is unaffected — invoke it without `--tool-prefix`.
+
 ## Available Tools
 
 The server provides the following tools that can be used through Claude Desktop:

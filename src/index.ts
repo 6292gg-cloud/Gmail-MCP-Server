@@ -29,6 +29,26 @@ const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
 const OAUTH_PATH = process.env.GMAIL_OAUTH_PATH || path.join(CONFIG_DIR, 'gcp-oauth.keys.json');
 const CREDENTIALS_PATH = process.env.GMAIL_CREDENTIALS_PATH || path.join(CONFIG_DIR, 'credentials.json');
 
+// Optional tool-name prefix — lets multiple instances of this server run side-by-side
+// without their tool names colliding in clients that disambiguate by base name.
+// Precedence: --tool-prefix=<value> / --tool-prefix <value> CLI flag, then
+// GMAIL_MCP_TOOL_PREFIX env var, then empty (no prefix → backward compatible).
+// Does not affect the `auth` subcommand, which is detected via process.argv[2] === 'auth'
+// and exits before the server starts — run `auth` without --tool-prefix.
+const TOOL_PREFIX = (() => {
+    const args = process.argv.slice(2);
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i] ?? '';
+        if (arg.startsWith('--tool-prefix=')) {
+            return arg.slice('--tool-prefix='.length);
+        }
+        if (arg === '--tool-prefix' && i + 1 < args.length) {
+            return args[i + 1] ?? '';
+        }
+    }
+    return process.env.GMAIL_MCP_TOOL_PREFIX || '';
+})();
+
 // Type definitions for Gmail API responses
 interface GmailMessagePart {
     partId?: string;
@@ -306,11 +326,22 @@ async function main() {
         const availableTools = toolDefinitions.filter(tool =>
             hasScope(authorizedScopes, tool.scopes)
         );
-        return { tools: toMcpTools(availableTools) };
+        const mcpTools = toMcpTools(availableTools);
+        // Apply optional TOOL_PREFIX so multiple server instances can coexist
+        // in clients that dedupe tool entries by base name.
+        return { tools: mcpTools.map(t => ({ ...t, name: TOOL_PREFIX + t.name })) };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
-        const { name, arguments: args } = request.params;
+        const { name: rawName, arguments: args } = request.params;
+
+        // Strip TOOL_PREFIX only if the result is a known base tool name.
+        // Guards against accidental over-stripping when the prefix overlaps a tool name's start
+        // (e.g. prefix="send_" + rawName="send_email" → "email", which is not a tool).
+        const stripped = TOOL_PREFIX && rawName.startsWith(TOOL_PREFIX)
+            ? rawName.slice(TOOL_PREFIX.length)
+            : rawName;
+        const name = getToolByName(stripped) ? stripped : rawName;
 
         // Verify the tool is authorized for the current scopes
         // This guards against direct tool calls that bypass ListTools
