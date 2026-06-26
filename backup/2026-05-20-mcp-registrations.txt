@@ -1,0 +1,13 @@
+# Backup of Gmail MCP registrations before fork installation
+# To restore: run the two `claude mcp add` commands below
+
+# gmail-info (scope: user)
+claude mcp remove "gmail-info" -s user
+claude mcp add gmail-info -s user -- npx -y @gongrzhe/server-gmail-autoauth-mcp
+
+# gmail-personal (scope: user, with env vars)
+claude mcp remove "gmail-personal" -s user
+claude mcp add gmail-personal -s user \
+  -e GMAIL_CREDENTIALS_PATH=C:\Users\Casa\.gmail-mcp\credentials-personal.json \
+  -e GMAIL_OAUTH_PATH=C:\Users\Casa\.gmail-mcp\gcp-oauth.keys.json \
+  -- npx -y @gongrzhe/server-gmail-autoauth-mcp

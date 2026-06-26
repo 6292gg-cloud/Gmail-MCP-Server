@@ -32,6 +32,7 @@ There's a downstream fork that took this in the **maximalist** direction. I'm no
 - **Draft lifecycle tools** — `send_draft`, `delete_draft`, `update_draft` close the orphan-draft gap: `send_draft` atomically sends an existing draft and removes it from Drafts (no ghost copy); `update_draft` mutates a draft in place preserving its ID (no draft pile-up across iteration loops); `delete_draft` discards an abandoned draft ([PR #30](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/30) by [@thisisambros](https://github.com/thisisambros))
 - **Tool annotations** — MCP spec annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on all tools for safer LLM tool execution ([PR #14](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/14) by [@bryankthompson](https://github.com/bryankthompson))
 - **Download email tool** — `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
+- **Signature support** — opt-in `includeSignature` on `send_email`/`draft_email` fetches the sender's Gmail send-as signature (`users.settings.sendAs.get`) and appends its HTML to the body. Closes a Gmail-web gap: web-compose never injects the signature into API-created drafts, so without this the signature (and its logo/social images) is simply absent. See **Signature behaviour** below for the why and the limits.
 
 All features are production-tested in daily use.
 
@@ -414,9 +415,27 @@ Creates a draft email without sending it. **Also supports attachments**.
   "subject": "Draft Report",
   "body": "Here's the draft report for your review.",
   "cc": ["manager@example.com"],
-  "attachments": ["/path/to/draft_report.docx"]
+  "attachments": ["/path/to/draft_report.docx"],
+  "includeSignature": true
 }
 ```
+
+#### Signature behaviour (`includeSignature`)
+
+Gmail's web composer auto-inserts your send-as signature **only when you compose in the browser**. When a draft is created through the API and you later open it in web-compose to review/send, Gmail does **not** inject the signature — so API-created drafts arrive with no signature and no signature images. This is a Gmail-side behaviour, not a bug in this server.
+
+Set `includeSignature: true` (default `false`) and the server will:
+
+1. Fetch the signature for the resolved send-as alias via `users.settings.sendAs.list` (matches the `from` address, else the default/primary alias). Requires the `gmail.settings.basic` scope (in `DEFAULT_SCOPES`).
+2. Append the signature HTML after the body and promote the message to `multipart/alternative` so the HTML part is present.
+
+**Images:** signature images render as long as they are referenced by **publicly reachable URLs** (e.g. WiseStamp/CloudFront-hosted icons and logos — verified end-to-end: an 8-image WiseStamp signature round-trips into the draft with all image URLs intact). Signatures whose images are stored as Gmail-internal/`cid:` inline parts are **not** supported — those URLs aren't publicly fetchable, so they'd render broken; embedding them would require downloading each image and re-attaching it as an inline MIME part, which this fork deliberately does not do.
+
+**Notes & limits:**
+- Opt-in by design — defaulting off avoids appending a signature to automated/internal drafts.
+- No de-duplication: if the body already contains a signature, you'll get two. Don't combine a hand-written signature with `includeSignature: true`.
+- Degraded-not-broken: if the signature fetch fails (scope/network), the draft is still created without a signature and a warning is logged.
+- Applies to both the no-attachment and attachment paths, and to `send_email`. **Not** wired into `update_draft`.
 
 ### 3. Read Email (`read_email`)
 Retrieves the content of a specific email by its ID. **Now shows enhanced attachment information**.

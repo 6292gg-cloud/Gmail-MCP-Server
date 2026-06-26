@@ -14,6 +14,7 @@ export const SendEmailSchema = z.object({
   threadId: z.string().optional().describe("Thread ID to reply to"),
   inReplyTo: z.string().optional().describe("Message ID being replied to"),
   attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
+  includeSignature: z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature (users.settings.sendAs.get) and append its HTML to the body. The draft becomes HTML (multipart/alternative). Use for client-facing drafts — Gmail web compose does NOT auto-insert the signature into API-created drafts, so this is the only way to get the signature (incl. images hosted on public CDN URLs) into the draft. Default false to avoid surprising automated/internal drafts."),
 });
 
 export const ReadEmailSchema = z.object({
