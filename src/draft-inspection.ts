@@ -457,7 +457,8 @@ function findSignatureRegion(bodyHtml: string, fingerprint: SignatureFingerprint
   const enclosingStart = findEnclosingBlockStart(bodyHtml, firstEvidence);
   const fallbackStart = rewindEmptyBlockSiblings(bodyHtml, enclosingStart);
   const start = findAppliedSignatureStart(bodyHtml, enclosingStart) ?? fallbackStart;
-  const end = findSignatureFragmentEnd(bodyHtml, start, lastEvidence) ?? lastEvidence;
+  const evidenceEnd = findSignatureFragmentEnd(bodyHtml, start, lastEvidence) ?? lastEvidence;
+  const end = advanceOverEmptyBlockSiblings(bodyHtml, evidenceEnd);
   return { start, end, html: bodyHtml.slice(start, end) };
 }
 
@@ -512,6 +513,21 @@ function rewindEmptyBlockSiblings(html: string, initialStart: number): number {
     start = previous.start;
   }
   return start;
+}
+
+function advanceOverEmptyBlockSiblings(html: string, initialEnd: number): number {
+  let end = initialEnd;
+  while (end < html.length) {
+    const whitespaceLength = html.slice(end).match(/^\s*/)?.[0].length ?? 0;
+    const nextStart = end + whitespaceLength;
+    const next = completedTopLevelBlocks(html.slice(nextStart))[0];
+    if (!next || next.start !== 0) break;
+
+    const fragment = html.slice(nextStart, nextStart + next.end);
+    if (normalizeText(htmlToText(fragment)) || extractHtmlAssetAttributes(fragment).length) break;
+    end = nextStart + next.end;
+  }
+  return end;
 }
 
 function completedTopLevelBlocks(html: string): Array<{ start: number; end: number }> {

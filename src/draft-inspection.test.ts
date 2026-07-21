@@ -369,6 +369,28 @@ describe('draft payload inspection', () => {
     expect(result.verdict).toBe('READY');
   });
 
+  it('includes a trailing empty WiseStamp fragment in the signature region', () => {
+    const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table><table aria-hidden="true"><tr><td><span>&nbsp;</span></td></tr></table>';
+    const reserializedSignature = '<table class="gmail_signature"><tbody><tr><td>Trevi Signature</td></tr></tbody></table><table aria-hidden="true"><tbody><tr><td><span>&nbsp;</span></td></tr></tbody></table>';
+    const result = inspectDraftPayload(
+      fixture({
+        text: 'Smoke paragraph one.\n\nSmoke paragraph two.',
+        html: `<p>Smoke paragraph one.</p><p>Smoke paragraph two.</p><br><br>${reserializedSignature}`,
+      }),
+      {
+        expectedBody: 'Smoke paragraph one.\n\nSmoke paragraph two.',
+        expectedHtmlBody: '<p>Smoke paragraph one.</p><p>Smoke paragraph two.</p>',
+        requireSignature: true,
+        checkRemoteSignatureAssets: false,
+      },
+      signatureHtml,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.errors).not.toContain('Draft HTML body does not match expected content');
+    expect(result.verdict).toBe('READY');
+  });
+
   it('retains unexpected trailing HTML after the matched signature for expected-body comparison', () => {
     const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>';
     const reserializedSignature = '<div class="gmail_signature"><table aria-hidden="true"><tr><td></td></tr></table><table><tbody><tr><td>Trevi Signature</td></tr></tbody></table></div>';
