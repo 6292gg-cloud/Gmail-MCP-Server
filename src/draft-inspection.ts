@@ -432,16 +432,19 @@ function countOccurrences(value: string, search: string): number {
 }
 
 function findSignatureRegion(bodyHtml: string, fingerprint: SignatureFingerprint): SignatureRegion | undefined {
-  const lowerHtml = decodeHtmlEntities(bodyHtml).toLowerCase();
+  const lowerHtml = bodyHtml.toLowerCase();
   const candidates: Array<{ start: number; end: number }> = [];
   const textTokens = fingerprint.text.match(/[\p{L}\p{N}@._-]{3,}/gu) ?? [];
   for (const token of textTokens) {
     const index = lowerHtml.indexOf(token.toLowerCase());
     if (index >= 0) candidates.push({ start: index, end: index + token.length });
   }
-  for (const path of fingerprint.assetPaths) {
-    const index = lowerHtml.indexOf(path.toLowerCase());
-    if (index >= 0) candidates.push({ start: index, end: index + path.length });
+  const expectedAssetPaths = new Set(fingerprint.assetPaths.map(path => path.toLowerCase()));
+  for (const attribute of extractHtmlAssetAttributes(bodyHtml)) {
+    const path = publicAssetPath(attribute.value)?.toLowerCase();
+    if (path && expectedAssetPaths.has(path)) {
+      candidates.push({ start: attribute.start, end: attribute.end });
+    }
   }
   if (!candidates.length) return undefined;
 
@@ -527,8 +530,10 @@ function completedTopLevelBlocks(html: string): Array<{ start: number; end: numb
 }
 
 function extractImageUrls(html: string): string[] {
-  const urls = [...html.matchAll(/<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)]
-    .map(match => decodeHtmlEntities(match[1] ?? match[2] ?? match[3] ?? ''))
+  const urls = [...html.matchAll(/<img\b[^>]*>/gi)]
+    .flatMap(match => extractHtmlAssetAttributes(match[0]))
+    .filter(attribute => attribute.name === 'src')
+    .map(attribute => attribute.value)
     .filter(Boolean);
   return [...new Set(urls)];
 }
@@ -538,17 +543,35 @@ function countImageElements(html: string): number {
 }
 
 function extractPublicAssetPaths(html: string): string[] {
-  return [...html.matchAll(/\b(?:src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)]
-    .map(match => decodeHtmlEntities(match[1] ?? match[2] ?? match[3] ?? ''))
-    .map(value => {
-      try {
-        const url = new URL(value);
-        return /^https?:$/.test(url.protocol) ? `${url.origin}${url.pathname}` : undefined;
-      } catch {
-        return undefined;
-      }
-    })
+  return extractHtmlAssetAttributes(html)
+    .map(attribute => publicAssetPath(attribute.value))
     .filter((path): path is string => Boolean(path));
+}
+
+interface HtmlAssetAttribute {
+  name: 'src' | 'href';
+  value: string;
+  start: number;
+  end: number;
+}
+
+function extractHtmlAssetAttributes(html: string): HtmlAssetAttribute[] {
+  return [...html.matchAll(/\b(src|href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)]
+    .map(match => ({
+      name: match[1].toLowerCase() as HtmlAssetAttribute['name'],
+      value: decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? ''),
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    }));
+}
+
+function publicAssetPath(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return /^https?:$/.test(url.protocol) ? `${url.origin}${url.pathname}` : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function sameStrings(left: string[], right: string[]): boolean {

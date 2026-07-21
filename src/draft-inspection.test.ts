@@ -177,6 +177,11 @@ beforeAll(async () => {
         redirect(`http://localhost:${port}/private`);
         return;
       default:
+        if (/^\/wisestamp-asset-\d+$/.test(requestUrl.pathname)) {
+          response.writeHead(200, { 'content-type': 'image/png' });
+          response.end(request.method === 'HEAD' ? undefined : 'not retained');
+          return;
+        }
         response.writeHead(500);
         response.end();
     }
@@ -725,6 +730,46 @@ describe('asynchronous draft inspection', () => {
       httpStatus: 200,
     });
     expect(JSON.stringify(result)).not.toMatch(/required-secret|private-fragment/);
+  });
+
+  it('keeps raw boundaries for multi-fragment WiseStamp signatures with encoded tracking assets', async () => {
+    const trackingQuery = (index: number) => Array.from(
+      { length: 12 },
+      (_, parameter) => `&amp;ws_${parameter}=asset-secret-${index}-${parameter}`,
+    ).join('');
+    const templateFragments = Array.from({ length: 9 }, (_, index) => (
+      `<table data-wisestamp-fragment="${index}"><tr><td>`
+      + `<img src="${publicBase}/wisestamp-asset-${index}?slot=${index}${trackingQuery(index)}">`
+      + `${index === 8 ? 'WiseStamp Boundary Token' : ''}`
+      + '</td></tr></table>'
+    )).join('');
+    const draftFragments = Array.from({ length: 9 }, (_, index) => (
+      `<table class="gmail_signature" data-fragment="${index}"><tbody><tr><td>`
+      + `<img alt="asset ${index}" src="${publicBase}/wisestamp-asset-${index}?slot=${index}${trackingQuery(index)}">`
+      + `${index === 8 ? 'WiseStamp Boundary Token' : ''}`
+      + '</td></tr></tbody></table>'
+    )).join('');
+    const result = await inspectDraft(
+      fixture({
+        text: 'Expected body',
+        html: `<p>Expected body</p><br><br>${draftFragments}`,
+      }),
+      {
+        expectedBody: 'Expected body',
+        expectedHtmlBody: '<p>Expected body</p>',
+        requireSignature: true,
+      },
+      templateFragments,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.signature.images).toBe(9);
+    expect(result.signature.assets).toHaveLength(9);
+    expect(result.signature.assets.every(asset => asset.status === 'reachable')).toBe(true);
+    expect(result.errors).not.toContain('Draft signature assets do not match the expected signature assets');
+    expect(result.errors).not.toContain('Draft HTML body does not match expected content');
+    expect(result.verdict).toBe('READY');
+    expect(JSON.stringify(result)).not.toMatch(/asset-secret|&amp;|token=/);
   });
 
   it('rejects and probes a changed draft signature image instead of the template image', async () => {
