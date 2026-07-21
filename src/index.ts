@@ -18,6 +18,7 @@ import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
+import { applySignature } from "./signature.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
@@ -403,48 +404,9 @@ async function main() {
                     }
                 }
 
-                // Append the sender's Gmail send-as signature when requested.
-                // Gmail web-compose does NOT inject the send-as signature into
-                // API-created drafts, so callers that want it (client-facing
-                // drafts) opt in via includeSignature. The signature HTML is
-                // fetched from users.settings.sendAs and appended to the body;
-                // its images are hosted on public CDN URLs (WiseStamp/CloudFront)
-                // so they render without any inline-attachment plumbing.
-                // Degraded-not-broken: a fetch failure logs and proceeds.
-                if (validatedArgs.includeSignature) {
-                    try {
-                        const sendAsResp = await gmail.users.settings.sendAs.list({ userId: 'me' });
-                        const aliases = sendAsResp.data.sendAs || [];
-                        const fromAddr = (validatedArgs.from || '').toLowerCase().trim();
-                        const match = fromAddr
-                            ? aliases.find((a) => (a.sendAsEmail || '').toLowerCase() === fromAddr)
-                            : undefined;
-                        const chosen = match
-                            || aliases.find((a) => a.isDefault)
-                            || aliases.find((a) => a.isPrimary)
-                            || aliases[0];
-                        const signatureHtml = (chosen?.signature || '').trim();
-                        if (signatureHtml) {
-                            // When htmlBody is absent, auto-convert plain body to HTML paragraphs
-                            // so line breaks survive the HTML context. Without this, plain text
-                            // embeds verbatim and paragraphs collapse into one unbroken block.
-                            const bodyAsHtml = validatedArgs.htmlBody
-                                || (validatedArgs.body
-                                    ? validatedArgs.body.split(/\n\n+/).map((p: string) => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('')
-                                    : '');
-                            validatedArgs.htmlBody = `${bodyAsHtml}<br><br>${signatureHtml}`;
-                            // A signature with images needs an HTML part — promote
-                            // an otherwise plain-text message to multipart/alternative.
-                            if (!validatedArgs.mimeType || validatedArgs.mimeType === 'text/plain') {
-                                validatedArgs.mimeType = 'multipart/alternative';
-                            }
-                        } else {
-                            console.warn('includeSignature: no signature set on the resolved send-as alias; proceeding without one.');
-                        }
-                    } catch (sigError: any) {
-                        console.warn(`includeSignature: could not fetch send-as signature: ${sigError.message}. Proceeding without signature.`);
-                    }
-                }
+                const signature = await applySignature(gmail, validatedArgs);
+                Object.assign(validatedArgs, signature.args);
+                const signatureDetails = `\nSignature: ${signature.status}${signature.warning ? `\nWarning: ${signature.warning}` : ''}`;
 
                 // Check if we have attachments
                 if (validatedArgs.attachments && validatedArgs.attachments.length > 0) {
@@ -469,7 +431,7 @@ async function main() {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Email sent successfully with ID: ${result.data.id}`,
+                                    text: `Email sent successfully with ID: ${result.data.id}${signatureDetails}`,
                                 },
                             ],
                         };
@@ -495,7 +457,7 @@ async function main() {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Email draft created successfully with ID: ${response.data.id}`,
+                                    text: `Email draft created successfully with ID: ${response.data.id}${signatureDetails}`,
                                 },
                             ],
                         };
@@ -533,7 +495,7 @@ async function main() {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Email sent successfully with ID: ${response.data.id}`,
+                                    text: `Email sent successfully with ID: ${response.data.id}${signatureDetails}`,
                                 },
                             ],
                         };
@@ -548,7 +510,7 @@ async function main() {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Email draft created successfully with ID: ${response.data.id}`,
+                                    text: `Email draft created successfully with ID: ${response.data.id}${signatureDetails}`,
                                 },
                             ],
                         };
