@@ -412,6 +412,31 @@ describe('draft payload inspection', () => {
     expect(result.verdict).toBe('READY');
   });
 
+  it('does not anchor an asset-backed signature to a generic body word', () => {
+    const signatureHtml = '<table data-wisestamp="1"><tr><td>This disclaimer belongs to the signature</td>'
+      + '<td><img src="https://assets.example.com/logo.png"></td></tr></table>';
+    const expectedHtml = '<p>Reply paragraph one.</p><p>This is a temporary threaded reply.</p>';
+    const result = inspectDraftPayload(
+      fixture({
+        text: 'Reply paragraph one.\n\nThis is a temporary threaded reply.',
+        html: `${expectedHtml}<br><br>${signatureHtml}`,
+      }),
+      {
+        expectedBody: 'Reply paragraph one.\n\nThis is a temporary threaded reply.',
+        expectedHtmlBody: expectedHtml,
+        requireHtml: true,
+        requireSignature: true,
+        checkRemoteSignatureAssets: false,
+      },
+      signatureHtml,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.body.htmlBlocks).toBe(2);
+    expect(result.errors).not.toContain('Draft HTML body does not match expected content');
+    expect(result.verdict).toBe('READY');
+  });
+
   it('retains unexpected trailing HTML after the matched signature for expected-body comparison', () => {
     const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>';
     const reserializedSignature = '<div class="gmail_signature"><table aria-hidden="true"><tr><td></td></tr></table><table><tbody><tr><td>Trevi Signature</td></tr></tbody></table></div>';

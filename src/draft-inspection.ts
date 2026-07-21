@@ -503,18 +503,28 @@ function countOccurrences(value: string, search: string): number {
 
 function findSignatureRegion(bodyHtml: string, fingerprint: SignatureFingerprint): SignatureRegion | undefined {
   const lowerHtml = bodyHtml.toLowerCase();
-  const candidates: Array<{ start: number; end: number }> = [];
-  const textTokens = fingerprint.text.match(/[\p{L}\p{N}@._-]{3,}/gu) ?? [];
-  for (const token of textTokens) {
-    const index = lowerHtml.indexOf(token.toLowerCase());
-    if (index >= 0) candidates.push({ start: index, end: index + token.length });
-  }
+  const assetCandidates: Array<{ start: number; end: number }> = [];
   const expectedAssetPaths = new Set(fingerprint.assetPaths.map(path => path.toLowerCase()));
   for (const attribute of extractHtmlAssetAttributes(bodyHtml)) {
     const path = publicAssetPath(attribute.value)?.toLowerCase();
     if (path && expectedAssetPaths.has(path)) {
-      candidates.push({ start: attribute.start, end: attribute.end });
+      assetCandidates.push({ start: attribute.start, end: attribute.end });
     }
+  }
+
+  const firstAsset = assetCandidates.length
+    ? Math.min(...assetCandidates.map(candidate => candidate.start))
+    : undefined;
+  const assetBoundary = firstAsset === undefined
+    ? undefined
+    : findAssetBackedSignatureStart(bodyHtml, firstAsset, fingerprint);
+  const textSearchStart = assetBoundary
+    ?? (firstAsset === undefined ? 0 : findEnclosingBlockStart(bodyHtml, firstAsset));
+  const candidates = [...assetCandidates];
+  const textTokens = fingerprint.text.match(/[\p{L}\p{N}@._-]{3,}/gu) ?? [];
+  for (const token of textTokens) {
+    const index = lowerHtml.indexOf(token.toLowerCase(), textSearchStart);
+    if (index >= 0) candidates.push({ start: index, end: index + token.length });
   }
   if (!candidates.length) return undefined;
 
@@ -522,10 +532,25 @@ function findSignatureRegion(bodyHtml: string, fingerprint: SignatureFingerprint
   const lastEvidence = Math.max(...candidates.map(candidate => candidate.end));
   const enclosingStart = findEnclosingBlockStart(bodyHtml, firstEvidence);
   const fallbackStart = rewindEmptyBlockSiblings(bodyHtml, enclosingStart);
-  const start = findAppliedSignatureStart(bodyHtml, enclosingStart) ?? fallbackStart;
+  const start = assetBoundary ?? findAppliedSignatureStart(bodyHtml, enclosingStart) ?? fallbackStart;
   const evidenceEnd = findSignatureFragmentEnd(bodyHtml, start, lastEvidence) ?? lastEvidence;
   const end = advanceOverEmptyBlockSiblings(bodyHtml, evidenceEnd);
   return { start, end, html: bodyHtml.slice(start, end) };
+}
+
+function findAssetBackedSignatureStart(
+  html: string,
+  firstAsset: number,
+  fingerprint: SignatureFingerprint,
+): number | undefined {
+  const prefix = html.slice(0, firstAsset);
+  const separators = [...prefix.matchAll(/<br\s*\/?>[ \t\r\n]*<br\s*\/?>/gi)];
+  for (let index = separators.length - 1; index >= 0; index -= 1) {
+    const separator = separators[index];
+    const boundary = (separator.index ?? 0) + separator[0].length;
+    if (containsSignature(html.slice(boundary), fingerprint)) return boundary;
+  }
+  return undefined;
 }
 
 function findAppliedSignatureStart(html: string, enclosingStart: number): number | undefined {
