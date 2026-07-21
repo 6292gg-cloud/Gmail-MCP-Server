@@ -435,7 +435,7 @@ Set `includeSignature: true` (default `false`) on either `draft_email` or `updat
 - `not_requested`: `includeSignature` was omitted or false. `applied`: the resolved send-as signature was appended. `already_present`: its fingerprint was already in the HTML body, so it was not appended again. `missing` or `error`: the draft/update still completes without a signature and returns a warning.
 - Duplicate prevention compares the resolved signature fingerprint with the resulting HTML. Do not rely on it to preserve a separately hand-authored signature that differs from the configured Gmail signature.
 - The behavior applies to attachment and no-attachment paths, `send_email`, `draft_email`, and `update_draft`.
-- Public `https:`/`http:` signature assets, including WiseStamp-hosted images, can be checked by `inspect_draft`. Gmail-internal `cid:` images are not embedded or supported. MIME construction and Gmail rendering are not pixel-perfect guarantees.
+- Public `https:`/`http:` signature assets, including WiseStamp-hosted images, can be checked by `inspect_draft`. It inspects and reports at most 20 remote signature assets; a signature with more than 20 is `NOT_READY`. Gmail-internal `cid:` images are not embedded or supported. MIME construction and Gmail rendering are not pixel-perfect guarantees.
 
 ### 3. Read Email (`read_email`)
 Retrieves the content of a specific email by its ID. **Now shows enhanced attachment information**.
@@ -716,7 +716,7 @@ Atomically sends an existing draft via `users.drafts.send` and removes it from t
 ```
 
 ### 25. Update Draft (`update_draft`)
-Replaces a draft's content in place via `users.drafts.update`, **preserving the draft ID**. Critical for iteration loops (draft → user requests changes → re-draft) so Drafts doesn't accumulate N copies. Reuses the same MIME builder as `draft_email`, so attachment and threading semantics match.
+Rebuilds and replaces the **entire MIME message** in place via `users.drafts.update`; only the draft ID is preserved automatically. It does not merge omitted fields from the old draft. Callers must re-supply every field that must survive: required `to`, `subject`, and `body`; plus `from`, `cc`, `bcc`, `attachments`, `threadId`, `inReplyTo`, `references`, `htmlBody`, and `includeSignature` as applicable. This prevents duplicate drafts during iteration, but callers must provide the complete desired message each time.
 
 ```json
 {
@@ -731,7 +731,7 @@ Replaces a draft's content in place via `users.drafts.update`, **preserving the 
 ```
 
 ### 26. Inspect Draft (`inspect_draft`)
-Reads a draft without modifying it and returns `READY` or `NOT_READY`. Use it after each create or update before sending. `requireSignature` requires exactly one configured send-as signature; `requireHtml` requires an HTML body that preserves the plain-text paragraph structure. `checkRemoteSignatureAssets` defaults to `requireSignature` and may only be true when `requireSignature` is true.
+Reads a draft without modifying it and returns `READY` or `NOT_READY`. Use it after each create or update before sending. `requireSignature` requires exactly one configured send-as signature; `requireHtml` requires an HTML body that preserves the plain-text paragraph structure. `checkRemoteSignatureAssets` defaults to `requireSignature` and may only be true when `requireSignature` is true. At most 20 remote signature assets are inspected and reported; more than 20 makes the draft `NOT_READY`.
 
 ```json
 {
