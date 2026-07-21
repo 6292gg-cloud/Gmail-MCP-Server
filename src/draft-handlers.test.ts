@@ -110,6 +110,29 @@ describe('handleInspectDraft', () => {
     expect(result).not.toHaveProperty('isError');
   });
 
+  it('propagates expected headers and bodies through the schema into inspection', async () => {
+    const fixture = fakeGmail({
+      draft: draftFixture({ html: '<p>Hello</p>' }),
+    });
+
+    const result = await handleInspectDraft(fixture.gmail, {
+      draftId: 'r-1',
+      expectedHeaders: { to: ['wrong@example.com'], subject: 'Wrong subject' },
+      expectedBody: 'Wrong text',
+      expectedHtmlBody: '<p>Wrong HTML</p>',
+    });
+    const parsed = inspection(result);
+
+    expect(parsed.verdict).toBe('NOT_READY');
+    expect(parsed.errors).toEqual(expect.arrayContaining([
+      'Draft To header does not match expected value',
+      'Draft Subject header does not match expected value',
+      'Draft plain-text body does not match expected content',
+      'Draft HTML body does not match expected content',
+    ]));
+    expect(result).not.toHaveProperty('isError');
+  });
+
   it('returns NOT_READY for a required signature when From is absent', async () => {
     const fixture = fakeGmail({ draft: draftFixture({ from: null }) });
 

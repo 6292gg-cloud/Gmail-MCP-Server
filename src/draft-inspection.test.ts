@@ -262,6 +262,86 @@ describe('draft payload inspection', () => {
     }]);
   });
 
+  it('rejects wrong recipients and subject without echoing private header values', () => {
+    const actualRecipient = 'actual-private@example.com';
+    const expectedRecipient = 'expected-private@example.com';
+    const draft = fixture();
+    const headers = draft.message?.payload?.headers ?? [];
+    const to = headers.find(header => header.name === 'To');
+    const subject = headers.find(header => header.name === 'Subject');
+    if (to) to.value = actualRecipient;
+    if (subject) subject.value = 'Actual private subject';
+
+    const result = inspectDraftPayload(draft, {
+      expectedHeaders: {
+        to: [expectedRecipient],
+        subject: 'Expected private subject',
+      },
+    });
+
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain('Draft To header does not match expected value');
+    expect(result.errors).toContain('Draft Subject header does not match expected value');
+    const diagnostics = result.errors.join(' ');
+    expect(diagnostics).not.toContain(actualRecipient);
+    expect(diagnostics).not.toContain(expectedRecipient);
+    expect(diagnostics).not.toContain('private subject');
+    expect(Math.max(...result.errors.map(error => error.length))).toBeLessThan(100);
+  });
+
+  it('rejects wrong plain and HTML bodies without leaking complete content', () => {
+    const actualText = 'actual-private-body';
+    const expectedText = 'expected-private-body';
+    const actualHtml = '<p>actual-private-html</p>';
+    const expectedHtml = '<p>expected-private-html</p>';
+
+    const result = inspectDraftPayload(
+      fixture({ text: actualText, html: actualHtml }),
+      { expectedBody: expectedText, expectedHtmlBody: expectedHtml },
+    );
+
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain('Draft plain-text body does not match expected content');
+    expect(result.errors).toContain('Draft HTML body does not match expected content');
+    const diagnostics = result.errors.join(' ');
+    expect(diagnostics).not.toContain(actualText);
+    expect(diagnostics).not.toContain(expectedText);
+    expect(diagnostics).not.toContain(actualHtml);
+    expect(diagnostics).not.toContain(expectedHtml);
+  });
+
+  it('matches canonical line endings and excludes the signature plus applySignature separator from HTML', () => {
+    const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>';
+    const reserializedSignature = '<table class="gmail_signature"><tbody><tr><td>Trevi\n Signature</td></tr></tbody></table>';
+    const signedDraft = fixture({
+      text: 'One\n\nTwo',
+      html: `<p>One</p>\n<p>Two</p><br><br>${reserializedSignature}`,
+    });
+    const subject = signedDraft.message?.payload?.headers?.find(header => header.name === 'Subject');
+    if (subject) subject.value = 'Inspection\r\n continued';
+    const result = inspectDraftPayload(
+      signedDraft,
+      {
+        expectedHeaders: {
+          from: 'Sender <sender@example.com>',
+          to: ['recipient@example.com'],
+          cc: ['copy@example.com'],
+          bcc: [],
+          subject: 'Inspection\n continued',
+        },
+        expectedBody: 'One\r\n\r\nTwo',
+        expectedHtmlBody: '<p>One</p>\r\n<p>Two</p>',
+        requireHtml: true,
+        requireSignature: true,
+        checkRemoteSignatureAssets: false,
+      },
+      signatureHtml,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.verdict).toBe('READY');
+  });
+
   it('does not let a reserialized signature table hide a collapsed message body', () => {
     const signatureHtml = '<table data-wisestamp="1"><tr><td><a href="https://cdn.example.com/card?source=mail">Trevi Signature</a></td></tr></table>';
     const reserialized = '<table class="gmail_signature"><tbody><tr><td><a href="https://cdn.example.com/card#footer"> Trevi\n Signature </a></td></tr></tbody></table>';
@@ -667,6 +747,31 @@ describe('inspect_draft MCP wiring', () => {
 
     expect(tool?.annotations.readOnlyHint).toBe(true);
     expect(tool?.scopes).toEqual(['gmail.readonly', 'gmail.modify']);
+  });
+
+  it('retains expected headers and complete text/HTML bodies in parsed handler options', () => {
+    expect(InspectDraftSchema.parse({
+      draftId: 'r-1',
+      expectedHeaders: {
+        from: 'Sender <sender@example.com>',
+        to: ['recipient@example.com'],
+        cc: ['copy@example.com'],
+        bcc: [],
+        subject: 'Subject',
+      },
+      expectedBody: 'Plain body',
+      expectedHtmlBody: '<p>Plain body</p>',
+    })).toMatchObject({
+      expectedHeaders: {
+        from: 'Sender <sender@example.com>',
+        to: ['recipient@example.com'],
+        cc: ['copy@example.com'],
+        bcc: [],
+        subject: 'Subject',
+      },
+      expectedBody: 'Plain body',
+      expectedHtmlBody: '<p>Plain body</p>',
+    });
   });
 
 });

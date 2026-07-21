@@ -11,10 +11,21 @@ const DEFAULT_PROBE_TIMEOUT_MS = 3000;
 const MAX_REDIRECTS = 2;
 
 export interface InspectDraftOptions {
+  expectedHeaders?: ExpectedDraftHeaders;
+  expectedBody?: string;
+  expectedHtmlBody?: string;
   expectedAttachments?: string[];
   requireSignature?: boolean;
   requireHtml?: boolean;
   checkRemoteSignatureAssets?: boolean;
+}
+
+export interface ExpectedDraftHeaders {
+  from?: string;
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject?: string;
 }
 
 export interface DraftInspection {
@@ -67,20 +78,26 @@ export function inspectDraftPayload(
   const payload = draft.message?.payload;
   if (payload) collectMimeContent(payload, content);
 
-  const text = content.text.join('\n\n').trim();
-  const html = content.html.join('').trim();
+  const rawText = content.text.join('\n\n');
+  const rawHtml = content.html.join('');
+  const text = rawText.trim();
+  const html = rawHtml.trim();
   const required = options.requireSignature === true;
   const checkAssets = options.checkRemoteSignatureAssets ?? required;
   const signatureFingerprint = required && signatureHtml
     ? fingerprintSignature(signatureHtml)
     : undefined;
-  const matches = signatureFingerprint && containsSignature(html, signatureFingerprint)
-    ? countSignatureMatches(html, signatureFingerprint)
+  const matches = signatureFingerprint && containsSignature(rawHtml, signatureFingerprint)
+    ? countSignatureMatches(rawHtml, signatureFingerprint)
     : 0;
   const signatureRegion = matches > 0 && signatureFingerprint
-    ? findSignatureRegion(html, signatureFingerprint)
+    ? findSignatureRegion(rawHtml, signatureFingerprint)
     : undefined;
-  const messageHtml = html.slice(0, signatureRegion?.start ?? html.length);
+  const htmlBeforeSignature = rawHtml.slice(0, signatureRegion?.start ?? rawHtml.length);
+  const comparableHtml = signatureRegion
+    ? removeAppliedSignatureSeparator(htmlBeforeSignature)
+    : rawHtml;
+  const messageHtml = comparableHtml.trim();
   const textParagraphs = countTextParagraphs(text);
   const htmlBlocks = countHtmlBlocks(messageHtml);
   const draftSignatureHtml = signatureRegion?.html ?? '';
@@ -119,6 +136,8 @@ export function inspectDraftPayload(
   validateAttachments(content.attachments, options.expectedAttachments, errors);
 
   const headers = payload?.headers ?? [];
+  validateExpectedHeaders(headers, options.expectedHeaders, errors);
+  validateExpectedBody(rawText, comparableHtml, options, errors);
   const result: DraftInspection = {
     verdict: errors.length ? 'NOT_READY' : 'READY',
     errors,
@@ -279,6 +298,59 @@ function decodeBase64Url(value: string): string {
 
 function headerValue(headers: gmail_v1.Schema$MessagePartHeader[], name: string): string {
   return headers.find(header => header.name?.toLowerCase() === name)?.value ?? '';
+}
+
+function validateExpectedHeaders(
+  headers: gmail_v1.Schema$MessagePartHeader[],
+  expected: ExpectedDraftHeaders | undefined,
+  errors: string[],
+): void {
+  if (!expected) return;
+  const fields: Array<[keyof ExpectedDraftHeaders, string]> = [
+    ['from', 'From'],
+    ['to', 'To'],
+    ['cc', 'Cc'],
+    ['bcc', 'Bcc'],
+    ['subject', 'Subject'],
+  ];
+
+  for (const [field, label] of fields) {
+    const expectedField = expected[field];
+    if (expectedField === undefined) continue;
+    const expectedValue = Array.isArray(expectedField) ? expectedField.join(', ') : expectedField;
+    const actualValue = headerValue(headers, field);
+    if (canonicalizeLineEndings(actualValue) !== canonicalizeLineEndings(expectedValue)) {
+      errors.push(`Draft ${label} header does not match expected value`);
+    }
+  }
+}
+
+function validateExpectedBody(
+  text: string,
+  html: string,
+  options: InspectDraftOptions,
+  errors: string[],
+): void {
+  if (
+    options.expectedBody !== undefined
+    && canonicalizeLineEndings(text) !== canonicalizeLineEndings(options.expectedBody)
+  ) {
+    errors.push('Draft plain-text body does not match expected content');
+  }
+  if (
+    options.expectedHtmlBody !== undefined
+    && canonicalizeLineEndings(html) !== canonicalizeLineEndings(options.expectedHtmlBody)
+  ) {
+    errors.push('Draft HTML body does not match expected content');
+  }
+}
+
+function canonicalizeLineEndings(value: string): string {
+  return value.replace(/\r\n?/g, '\n');
+}
+
+function removeAppliedSignatureSeparator(html: string): string {
+  return html.replace(/<br\s*\/?>[ \t\r\n]*<br\s*\/?>[ \t\r\n]*$/i, '');
 }
 
 function countTextParagraphs(text: string): number {

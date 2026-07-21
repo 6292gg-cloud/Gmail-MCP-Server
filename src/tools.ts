@@ -65,8 +65,19 @@ export const UpdateDraftSchema = z.object({
   includeSignature: IncludeSignatureSchema,
 });
 
+const ExpectedDraftHeadersSchema = z.object({
+  from: z.string().optional().describe("Exact expected From header"),
+  to: z.array(z.string()).optional().describe("Exact expected To recipients in header order"),
+  cc: z.array(z.string()).optional().describe("Exact expected CC recipients in header order"),
+  bcc: z.array(z.string()).optional().describe("Exact expected BCC recipients in header order"),
+  subject: z.string().optional().describe("Exact expected Subject header"),
+});
+
 export const InspectDraftSchema = z.object({
   draftId: z.string().describe("ID of the draft to inspect"),
+  expectedHeaders: ExpectedDraftHeadersSchema.optional().describe("Expected rendered draft headers; recipient arrays are compared in order using their comma-separated header form"),
+  expectedBody: z.string().optional().describe("Complete expected plain-text body; compared exactly after line-ending normalization"),
+  expectedHtmlBody: z.string().optional().describe("Complete expected HTML body before the Gmail signature; compared exactly after line-ending normalization"),
   expectedAttachments: z.array(z.string()).optional().describe("Exact attachment basenames expected on the draft"),
   requireSignature: z.boolean().optional().default(false).describe("Require exactly one matching Gmail send-as signature"),
   requireHtml: z.boolean().optional().default(false).describe("Require an HTML body that preserves the plain-text structure"),
