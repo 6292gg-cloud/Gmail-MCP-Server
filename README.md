@@ -716,7 +716,7 @@ Atomically sends an existing draft via `users.drafts.send` and removes it from t
 ```
 
 ### 25. Update Draft (`update_draft`)
-Rebuilds and replaces the **entire MIME message** in place via `users.drafts.update`; only the draft ID is preserved automatically. It does not merge omitted fields from the old draft. Callers must re-supply every field that must survive: required `to`, `subject`, and `body`; plus `from`, `cc`, `bcc`, `attachments`, `threadId`, `inReplyTo`, `references`, `htmlBody`, and `includeSignature` as applicable. This prevents duplicate drafts during iteration, but callers must provide the complete desired message each time.
+Rebuilds and replaces the **entire MIME message** in place via `users.drafts.update`; only the draft ID is preserved automatically. It does not merge omitted fields from the old draft. Callers must re-supply every field that must survive: required `to`, `subject`, and `body`; plus `from`, `cc`, `bcc`, `attachments`, `threadId`, `inReplyTo`, `references`, `htmlBody`, `mimeType`, and `includeSignature` as applicable. Omitting `mimeType` defaults it to `text/plain`, so re-supply `text/html` or `multipart/alternative` when that is the desired prior format. This prevents duplicate drafts during iteration, but callers must provide the complete desired message each time.
 
 ```json
 {
