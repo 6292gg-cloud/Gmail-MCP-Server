@@ -837,6 +837,30 @@ describe('asynchronous draft inspection', () => {
     expect(JSON.stringify(result)).not.toMatch(/asset-secret|&amp;|token=/);
   });
 
+  it('includes the complete final standalone tracking pixel tag in the signature region', () => {
+    const trackingUrl = 'https://tracking.example.com/tpx.gif?source=wisestamp';
+    const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>'
+      + `<img src="${trackingUrl}" alt="__tpx__">`;
+    const result = inspectDraftPayload(
+      fixture({
+        text: 'Smoke paragraph one.\n\nSmoke paragraph two.',
+        html: '<p>Smoke paragraph one.</p><p>Smoke paragraph two.</p><br><br>'
+          + signatureHtml,
+      }),
+      {
+        expectedBody: 'Smoke paragraph one.\n\nSmoke paragraph two.',
+        expectedHtmlBody: '<p>Smoke paragraph one.</p><p>Smoke paragraph two.</p>',
+        requireSignature: true,
+        checkRemoteSignatureAssets: false,
+      },
+      signatureHtml,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.errors).not.toContain('Draft HTML body does not match expected content');
+    expect(result.verdict).toBe('READY');
+  });
+
   it('rejects and probes a changed draft signature image instead of the template image', async () => {
     const templateSignature = signatureWithAsset(`${publicBase}/ok?source=template`);
     const draftSignature = signatureWithAsset(`${publicBase}/missing?source=draft`);

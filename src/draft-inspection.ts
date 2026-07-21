@@ -544,7 +544,28 @@ function findSignatureFragmentEnd(html: string, start: number, lastEvidence: num
   const relativeEvidence = lastEvidence - start;
   const ranges = completedTopLevelBlocks(html.slice(start));
   const containing = ranges.find(range => range.start <= relativeEvidence && relativeEvidence <= range.end);
-  return containing ? start + containing.end : undefined;
+  return containing ? start + containing.end : findContainingStartTagEnd(html, lastEvidence);
+}
+
+function findContainingStartTagEnd(html: string, evidenceIndex: number): number | undefined {
+  const tagStart = html.lastIndexOf('<', evidenceIndex);
+  if (tagStart < 0 || !/^<[a-z]/i.test(html.slice(tagStart))) return undefined;
+
+  let quote: '"' | "'" | undefined;
+  for (let index = tagStart + 1; index < html.length; index += 1) {
+    const character = html[index];
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '>') return index >= evidenceIndex ? index + 1 : undefined;
+    if (character === '<') return undefined;
+  }
+  return undefined;
 }
 
 function findEnclosingBlockStart(html: string, evidenceIndex: number): number {
