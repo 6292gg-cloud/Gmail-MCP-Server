@@ -347,6 +347,28 @@ describe('draft payload inspection', () => {
     expect(result.verdict).toBe('READY');
   });
 
+  it('ignores trailing outer whitespace after a multi-fragment signature', () => {
+    const signatureHtml = '<table aria-hidden="true"><tr><td></td></tr></table><table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>';
+    const reserializedSignature = '<table aria-hidden="true"><tbody><tr><td></td></tr></tbody></table><table class="gmail_signature"><tbody><tr><td>Trevi Signature</td></tr></tbody></table>';
+    const result = inspectDraftPayload(
+      fixture({
+        text: 'Expected body',
+        html: `<p>Expected body</p><br><br>${reserializedSignature}\r\n\t `,
+      }),
+      {
+        expectedBody: 'Expected body',
+        expectedHtmlBody: '<p>Expected body</p>',
+        requireSignature: true,
+        checkRemoteSignatureAssets: false,
+      },
+      signatureHtml,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.errors).not.toContain('Draft HTML body does not match expected content');
+    expect(result.verdict).toBe('READY');
+  });
+
   it('retains unexpected trailing HTML after the matched signature for expected-body comparison', () => {
     const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>';
     const reserializedSignature = '<div class="gmail_signature"><table aria-hidden="true"><tr><td></td></tr></table><table><tbody><tr><td>Trevi Signature</td></tr></tbody></table></div>';

@@ -339,7 +339,7 @@ function validateExpectedBody(
   }
   if (
     options.expectedHtmlBody !== undefined
-    && canonicalizeLineEndings(html) !== canonicalizeLineEndings(options.expectedHtmlBody)
+    && canonicalizeHtmlForComparison(html) !== canonicalizeHtmlForComparison(options.expectedHtmlBody)
   ) {
     errors.push('Draft HTML body does not match expected content');
   }
@@ -347,6 +347,10 @@ function validateExpectedBody(
 
 function canonicalizeLineEndings(value: string): string {
   return value.replace(/\r\n?/g, '\n');
+}
+
+function canonicalizeHtmlForComparison(value: string): string {
+  return canonicalizeLineEndings(value).trim();
 }
 
 function removeAppliedSignatureSeparator(html: string): string {
