@@ -1,4 +1,6 @@
 import { promises as dns } from 'node:dns';
+import http, { type IncomingMessage, type RequestOptions } from 'node:http';
+import https from 'node:https';
 import { isIP } from 'node:net';
 import type { gmail_v1 } from 'googleapis';
 import { containsSignature, fingerprintSignature, type SignatureFingerprint } from './signature.js';
@@ -38,6 +40,22 @@ interface MimeContent {
   attachments: DraftInspection['attachments'];
 }
 
+interface SignatureRegion {
+  start: number;
+  end: number;
+  html: string;
+}
+
+interface ResolvedTarget {
+  address: string;
+  family: 4 | 6;
+}
+
+interface PinnedResponse {
+  status: number;
+  location?: string;
+}
+
 export function inspectDraftPayload(
   draft: gmail_v1.Schema$Draft,
   options: InspectDraftOptions,
@@ -59,13 +77,15 @@ export function inspectDraftPayload(
   const matches = signatureFingerprint && containsSignature(html, signatureFingerprint)
     ? countSignatureMatches(html, signatureFingerprint)
     : 0;
-  const signatureBoundary = matches > 0 && signatureFingerprint
-    ? findSignatureBoundary(html, signatureFingerprint)
-    : html.length;
-  const messageHtml = html.slice(0, signatureBoundary);
+  const signatureRegion = matches > 0 && signatureFingerprint
+    ? findSignatureRegion(html, signatureFingerprint)
+    : undefined;
+  const messageHtml = html.slice(0, signatureRegion?.start ?? html.length);
   const textParagraphs = countTextParagraphs(text);
   const htmlBlocks = countHtmlBlocks(messageHtml);
-  const imageUrls = signatureHtml ? extractImageUrls(signatureHtml) : [];
+  const draftSignatureHtml = signatureRegion?.html ?? '';
+  const imageUrls = extractImageUrls(draftSignatureHtml);
+  const imageElements = countImageElements(draftSignatureHtml);
   const boundedAssets = imageUrls.slice(0, MAX_REMOTE_ASSETS).map(url => ({
     url: sanitizeUrl(url),
     status: 'unchecked' as const,
@@ -85,6 +105,12 @@ export function inspectDraftPayload(
     errors.push('Required signature fingerprint is missing');
   } else if (required && matches > 1) {
     errors.push('Signature fingerprint appears more than once');
+  }
+  if (required && matches === 1 && signatureFingerprint) {
+    const actualAssetPaths = [...new Set(extractPublicAssetPaths(draftSignatureHtml))].sort();
+    if (!sameStrings(actualAssetPaths, signatureFingerprint.assetPaths)) {
+      errors.push('Draft signature assets do not match the expected signature assets');
+    }
   }
   if (imageUrls.length > MAX_REMOTE_ASSETS) {
     errors.push(`Signature contains more than ${MAX_REMOTE_ASSETS} remote assets`);
@@ -115,7 +141,7 @@ export function inspectDraftPayload(
     signature: {
       required,
       matches,
-      images: imageUrls.length,
+      images: imageElements,
       assets: boundedAssets,
     },
     attachments: content.attachments,
@@ -144,63 +170,46 @@ export async function probeRemoteAsset(url: string, timeoutMs = DEFAULT_PROBE_TI
   const timer = setTimeout(() => controller.abort(), effectiveTimeout);
 
   try {
-    for (let redirects = 0; ; redirects += 1) {
-      const unsafeReason = await validatePublicTarget(current, controller.signal);
-      if (unsafeReason) {
-        return { url: sanitizeUrl(current.toString()), status: 'unreachable', reason: unsafeReason };
+    let redirects = 0;
+    let usedRangeFallback = false;
+    while (true) {
+      const headResolution = await resolvePublicTarget(current, controller.signal);
+      if ('reason' in headResolution) {
+        return { url: sanitizeUrl(current.toString()), status: 'unreachable', reason: headResolution.reason };
       }
 
-      const response = await fetch(current, {
-        method: 'HEAD',
-        redirect: 'manual',
-        signal: controller.signal,
-      });
-
+      const response = await requestPinned(current, headResolution.target, 'HEAD', controller.signal);
       if (isRedirect(response.status)) {
-        await cancelBody(response);
-        const location = response.headers.get('location');
-        if (!location || redirects >= MAX_REDIRECTS) {
-          return {
-            url: sanitizeUrl(current.toString()),
-            status: 'unreachable',
-            httpStatus: response.status,
-            reason: location ? `Redirect limit of ${MAX_REDIRECTS} exceeded` : 'Redirect is missing a Location header',
-          };
-        }
-        current = new URL(location, current);
-        if (!/^https?:$/.test(current.protocol)) {
-          return { url: sanitizeUrl(current.toString()), status: 'unsupported', reason: `Unsupported protocol: ${current.protocol}` };
-        }
-        if (current.username || current.password) {
-          return { url: sanitizeUrl(current.toString()), status: 'unreachable', reason: 'URLs containing credentials are not allowed' };
-        }
+        const redirect = nextRedirect(current, response, redirects);
+        if ('result' in redirect) return redirect.result;
+        current = redirect.url;
+        redirects += 1;
         continue;
       }
 
       if (response.status === 405 || response.status === 501) {
-        await cancelBody(response);
-        const fallbackUnsafeReason = await validatePublicTarget(current, controller.signal);
-        if (fallbackUnsafeReason) {
+        if (usedRangeFallback) return terminalProbeResult(current, response.status);
+        usedRangeFallback = true;
+        const fallbackResolution = await resolvePublicTarget(current, controller.signal);
+        if ('reason' in fallbackResolution) {
           return {
             url: sanitizeUrl(current.toString()),
             status: 'unreachable',
-            reason: fallbackUnsafeReason,
+            reason: fallbackResolution.reason,
           };
         }
-        const fallback = await fetch(current, {
-          method: 'GET',
-          headers: { Range: 'bytes=0-0' },
-          redirect: 'manual',
-          signal: controller.signal,
-        });
-        const result = terminalProbeResult(current, fallback.status);
-        await cancelBody(fallback);
-        return result;
+        const fallback = await requestPinned(current, fallbackResolution.target, 'GET', controller.signal);
+        if (isRedirect(fallback.status)) {
+          const redirect = nextRedirect(current, fallback, redirects);
+          if ('result' in redirect) return redirect.result;
+          current = redirect.url;
+          redirects += 1;
+          continue;
+        }
+        return terminalProbeResult(current, fallback.status);
       }
 
-      const result = terminalProbeResult(current, response.status);
-      await cancelBody(response);
-      return result;
+      return terminalProbeResult(current, response.status);
     }
   } catch (error) {
     const timedOut = controller.signal.aborted;
@@ -223,8 +232,13 @@ export async function inspectDraft(
   const checkAssets = options.checkRemoteSignatureAssets ?? options.requireSignature === true;
   if (!checkAssets || !options.requireSignature || result.signature.matches !== 1) return result;
 
-  const sourceAssetUrls = signatureHtml
-    ? extractImageUrls(signatureHtml).slice(0, MAX_REMOTE_ASSETS)
+  const content: MimeContent = { text: [], html: [], attachments: [] };
+  if (draft.message?.payload) collectMimeContent(draft.message.payload, content);
+  const bodyHtml = content.html.join('').trim();
+  const fingerprint = signatureHtml ? fingerprintSignature(signatureHtml) : undefined;
+  const region = fingerprint ? findSignatureRegion(bodyHtml, fingerprint) : undefined;
+  const sourceAssetUrls = region
+    ? extractImageUrls(region.html).slice(0, MAX_REMOTE_ASSETS)
     : [];
   result.signature.assets = await Promise.all(
     sourceAssetUrls.map(assetUrl => probeRemoteAsset(assetUrl)),
@@ -345,7 +359,7 @@ function countOccurrences(value: string, search: string): number {
   return count;
 }
 
-function findSignatureBoundary(bodyHtml: string, fingerprint: SignatureFingerprint): number {
+function findSignatureRegion(bodyHtml: string, fingerprint: SignatureFingerprint): SignatureRegion | undefined {
   const lowerHtml = decodeHtmlEntities(bodyHtml).toLowerCase();
   const candidates: number[] = [];
   const textTokens = fingerprint.text.match(/[\p{L}\p{N}@._-]{3,}/gu) ?? [];
@@ -357,7 +371,65 @@ function findSignatureBoundary(bodyHtml: string, fingerprint: SignatureFingerpri
     const index = lowerHtml.indexOf(path.toLowerCase());
     if (index >= 0) candidates.push(index);
   }
-  return candidates.length ? Math.min(...candidates) : bodyHtml.length;
+  if (!candidates.length) return undefined;
+
+  const evidenceIndex = Math.min(...candidates);
+  const enclosingStart = findEnclosingBlockStart(bodyHtml, evidenceIndex);
+  const start = rewindEmptyBlockSiblings(bodyHtml, enclosingStart);
+  return { start, end: bodyHtml.length, html: bodyHtml.slice(start) };
+}
+
+function findEnclosingBlockStart(html: string, evidenceIndex: number): number {
+  const stack: Array<{ tag: string; index: number }> = [];
+  for (const match of html.matchAll(/<\/?(table|ul|ol|p|div)\b[^>]*>/gi)) {
+    const index = match.index ?? 0;
+    if (index >= evidenceIndex) break;
+    const tag = match[1].toLowerCase();
+    if (match[0].startsWith('</')) {
+      for (let cursor = stack.length - 1; cursor >= 0; cursor -= 1) {
+        if (stack[cursor].tag === tag) {
+          stack.splice(cursor, 1);
+          break;
+        }
+      }
+    } else {
+      stack.push({ tag, index });
+    }
+  }
+  const preferred = [...stack].reverse().find(entry => /^(?:table|ul|ol|p)$/.test(entry.tag));
+  return preferred?.index ?? stack[stack.length - 1]?.index ?? evidenceIndex;
+}
+
+function rewindEmptyBlockSiblings(html: string, initialStart: number): number {
+  let start = initialStart;
+  while (start > 0) {
+    const ranges = completedTopLevelBlocks(html.slice(0, start));
+    const previous = ranges[ranges.length - 1];
+    if (!previous || html.slice(previous.end, start).trim() || normalizeText(htmlToText(html.slice(previous.start, previous.end)))) {
+      break;
+    }
+    start = previous.start;
+  }
+  return start;
+}
+
+function completedTopLevelBlocks(html: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const stack: Array<{ tag: string; index: number }> = [];
+  for (const match of html.matchAll(/<\/?(table|ul|ol|p)\b[^>]*>/gi)) {
+    const tag = match[1].toLowerCase();
+    if (!match[0].startsWith('</')) {
+      stack.push({ tag, index: match.index ?? 0 });
+      continue;
+    }
+    for (let cursor = stack.length - 1; cursor >= 0; cursor -= 1) {
+      if (stack[cursor].tag !== tag) continue;
+      const [opened] = stack.splice(cursor, 1);
+      if (stack.length === 0) ranges.push({ start: opened.index, end: (match.index ?? 0) + match[0].length });
+      break;
+    }
+  }
+  return ranges;
 }
 
 function extractImageUrls(html: string): string[] {
@@ -365,6 +437,10 @@ function extractImageUrls(html: string): string[] {
     .map(match => decodeHtmlEntities(match[1] ?? match[2] ?? match[3] ?? ''))
     .filter(Boolean);
   return [...new Set(urls)];
+}
+
+function countImageElements(html: string): number {
+  return [...html.matchAll(/<img\b/gi)].length;
 }
 
 function extractPublicAssetPaths(html: string): string[] {
@@ -379,6 +455,10 @@ function extractPublicAssetPaths(html: string): string[] {
       }
     })
     .filter((path): path is string => Boolean(path));
+}
+
+function sameStrings(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function validateAttachments(
@@ -445,33 +525,109 @@ function terminalProbeResult(url: URL, status: number): RemoteAssetResult {
     : { url: sanitizeUrl(url.toString()), status: 'unreachable', httpStatus: status, reason: `HTTP ${status}` };
 }
 
-async function cancelBody(response: Response): Promise<void> {
-  try {
-    await response.body?.cancel();
-  } catch {
-    // The response verdict is independent of transport cleanup errors.
+function nextRedirect(
+  current: URL,
+  response: PinnedResponse,
+  redirects: number,
+): { url: URL } | { result: RemoteAssetResult } {
+  if (!response.location || redirects >= MAX_REDIRECTS) {
+    return {
+      result: {
+        url: sanitizeUrl(current.toString()),
+        status: 'unreachable',
+        httpStatus: response.status,
+        reason: response.location
+          ? `Redirect limit of ${MAX_REDIRECTS} exceeded`
+          : 'Redirect is missing a Location header',
+      },
+    };
   }
+
+  let url: URL;
+  try {
+    url = new URL(response.location, current);
+  } catch {
+    return {
+      result: {
+        url: sanitizeUrl(current.toString()),
+        status: 'unreachable',
+        httpStatus: response.status,
+        reason: 'Redirect Location is invalid',
+      },
+    };
+  }
+  if (!/^https?:$/.test(url.protocol)) {
+    return { result: { url: sanitizeUrl(url.toString()), status: 'unsupported', reason: `Unsupported protocol: ${url.protocol}` } };
+  }
+  if (url.username || url.password) {
+    return { result: { url: sanitizeUrl(url.toString()), status: 'unreachable', reason: 'URLs containing credentials are not allowed' } };
+  }
+  return { url };
 }
 
-async function validatePublicTarget(url: URL, signal: AbortSignal): Promise<string | undefined> {
-  if (url.username || url.password) return 'URLs containing credentials are not allowed';
+async function resolvePublicTarget(
+  url: URL,
+  signal: AbortSignal,
+): Promise<{ target: ResolvedTarget } | { reason: string }> {
+  if (url.username || url.password) return { reason: 'URLs containing credentials are not allowed' };
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
-  if (!hostname) return 'URL hostname is missing';
+  if (!hostname) return { reason: 'URL hostname is missing' };
 
   const ipVersion = isIP(hostname);
-  if (ipVersion) return isPublicAddress(hostname) ? undefined : `Non-public address rejected: ${hostname}`;
+  if (ipVersion) {
+    return isPublicAddress(hostname)
+      ? { target: { address: hostname, family: ipVersion as 4 | 6 } }
+      : { reason: `Non-public address rejected: ${hostname}` };
+  }
 
-  let addresses: Array<{ address: string }>;
+  let addresses: Array<{ address: string; family: number }>;
   try {
     addresses = await raceAbort(dns.lookup(hostname, { all: true, verbatim: true }), signal);
   } catch (error) {
     if (signal.aborted) throw error;
-    return `DNS lookup failed for ${hostname}`;
+    return { reason: `DNS lookup failed for ${hostname}` };
   }
-  if (!addresses.length) return `DNS lookup returned no addresses for ${hostname}`;
+  if (!addresses.length) return { reason: `DNS lookup returned no addresses for ${hostname}` };
 
   const unsafe = addresses.find(result => !isPublicAddress(result.address));
-  return unsafe ? `Non-public address rejected for ${hostname}: ${unsafe.address}` : undefined;
+  if (unsafe) return { reason: `Non-public address rejected for ${hostname}: ${unsafe.address}` };
+  const selected = addresses[0];
+  return { target: { address: selected.address, family: selected.family as 4 | 6 } };
+}
+
+function requestPinned(
+  url: URL,
+  target: ResolvedTarget,
+  method: 'HEAD' | 'GET',
+  signal: AbortSignal,
+): Promise<PinnedResponse> {
+  return new Promise<PinnedResponse>((resolve, reject) => {
+    const originalHostname = url.hostname.replace(/^\[|\]$/g, '');
+    const options: RequestOptions & { servername?: string } = {
+      protocol: url.protocol,
+      hostname: target.address,
+      family: target.family,
+      port: url.port || undefined,
+      path: `${url.pathname}${url.search}`,
+      method,
+      headers: {
+        Host: url.host,
+        ...(method === 'GET' ? { Range: 'bytes=0-0' } : {}),
+      },
+      signal,
+      ...(url.protocol === 'https:' && !isIP(originalHostname) ? { servername: originalHostname } : {}),
+    };
+    const transport = url.protocol === 'https:' ? https : http;
+    const request = transport.request(options, (response: IncomingMessage) => {
+      const locationHeader = response.headers.location;
+      const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
+      const result: PinnedResponse = { status: response.statusCode ?? 0, ...(location ? { location } : {}) };
+      response.destroy();
+      resolve(result);
+    });
+    request.once('error', reject);
+    request.end();
+  });
 }
 
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

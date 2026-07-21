@@ -1,4 +1,5 @@
-import { createServer, type Server } from 'node:http';
+import http, { createServer, type Server } from 'node:http';
+import https from 'node:https';
 import { promises as dns } from 'node:dns';
 import type { AddressInfo } from 'node:net';
 import type { gmail_v1 } from 'googleapis';
@@ -22,12 +23,19 @@ interface RecordedRequest {
   range?: string;
 }
 
+interface RecordedConnection {
+  hostname: string;
+  hostHeader: string;
+  servername?: string;
+}
+
 const PUBLIC_HOST = '93.184.216.34';
 let server: Server;
 let publicBase: string;
 let port: number;
 let requests: RecordedRequest[] = [];
-const nativeFetch = globalThis.fetch;
+let connections: RecordedConnection[] = [];
+const nativeHttpRequest = http.request.bind(http);
 
 function encoded(value: string): string {
   return Buffer.from(value).toString('base64url');
@@ -127,6 +135,22 @@ beforeAll(async () => {
           response.end('secret-response-body');
         }
         return;
+      case '/head-405-redirect':
+        if (request.method === 'HEAD') {
+          response.writeHead(405);
+          response.end();
+        } else {
+          redirect(`${publicBase}/ok`);
+        }
+        return;
+      case '/head-405-redirect-second-fallback':
+        if (request.method === 'HEAD') {
+          response.writeHead(405);
+          response.end();
+        } else {
+          redirect(`${publicBase}/head-405`);
+        }
+        return;
       case '/missing':
         response.writeHead(404);
         response.end('missing-body');
@@ -161,16 +185,31 @@ beforeAll(async () => {
   port = (server.address() as AddressInfo).port;
   publicBase = `http://${PUBLIC_HOST}:${port}`;
 
-  vi.stubGlobal('fetch', (input: string | URL | Request, init?: RequestInit) => {
-    const originalUrl = input instanceof Request ? input.url : input.toString();
-    const routed = new URL(originalUrl);
-    if (routed.hostname === PUBLIC_HOST || routed.hostname === 'asset.test') routed.hostname = '127.0.0.1';
-    return nativeFetch(routed, init);
-  });
+  vi.spyOn(http, 'request').mockImplementation(((options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => {
+    const headers = options.headers as Record<string, string> | undefined;
+    connections.push({
+      hostname: String(options.hostname ?? options.host ?? ''),
+      hostHeader: String(headers?.Host ?? headers?.host ?? ''),
+      servername: options.servername,
+    });
+    return nativeHttpRequest({ ...options, hostname: '127.0.0.1' }, callback);
+  }) as typeof http.request);
+  vi.spyOn(https, 'request').mockImplementation(((options: https.RequestOptions, callback: (response: http.IncomingMessage) => void) => {
+    const headers = options.headers as Record<string, string> | undefined;
+    connections.push({
+      hostname: String(options.hostname ?? options.host ?? ''),
+      hostHeader: String(headers?.Host ?? headers?.host ?? ''),
+      servername: options.servername,
+    });
+    return nativeHttpRequest({ ...options, protocol: 'http:', hostname: '127.0.0.1', servername: undefined }, callback);
+  }) as typeof https.request);
+
+  vi.stubGlobal('fetch', vi.fn(() => { throw new Error('probe transport must not call fetch'); }));
 });
 
 beforeEach(() => {
   requests = [];
+  connections = [];
 });
 
 afterAll(async () => {
@@ -239,6 +278,19 @@ describe('draft payload inspection', () => {
 
   it('does not count a partially sliced signature container as a message block', () => {
     const signatureHtml = '<table data-wisestamp="1"><tr><td>Signature Boundary Token</td></tr></table>';
+    const result = inspectDraftPayload(
+      fixture({ text: 'One\n\nTwo', html: `<p>One Two</p>${signatureHtml}` }),
+      { requireHtml: true, requireSignature: true },
+      signatureHtml,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.body.htmlBlocks).toBe(1);
+    expect(result.verdict).toBe('NOT_READY');
+  });
+
+  it('excludes a complete decorative signature table before the first visible token', () => {
+    const signatureHtml = '<table aria-hidden="true"><tr><td></td></tr></table><table data-wisestamp="1"><tr><td>Visible Signature Token</td></tr></table>';
     const result = inspectDraftPayload(
       fixture({ text: 'One\n\nTwo', html: `<p>One Two</p>${signatureHtml}` }),
       { requireHtml: true, requireSignature: true },
@@ -352,6 +404,18 @@ describe('draft payload inspection', () => {
     expect(serialized).not.toContain('secret=24');
     expect(result.errors).toContain('Signature contains more than 20 remote assets');
   });
+
+  it('counts image elements separately from deduplicated probe URLs', () => {
+    const signatureHtml = '<table><tr><td>Repeated Image Signature<img src="https://assets.example.com/logo.png"><img src="https://assets.example.com/logo.png"></td></tr></table>';
+    const result = inspectDraftPayload(
+      fixture({ html: `<p>One</p><p>Two</p>${signatureHtml}` }),
+      { requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+
+    expect(result.signature.images).toBe(2);
+    expect(result.signature.assets).toHaveLength(1);
+  });
 });
 
 describe('bounded remote asset probing', () => {
@@ -383,19 +447,74 @@ describe('bounded remote asset probing', () => {
     expect(JSON.stringify(result)).not.toMatch(/secret-response-body|get-secret/);
   });
 
-  it('revalidates DNS before the range GET and rejects a rebinding target', async () => {
+  it('pins the connection to the validated public IP without a second resolver lookup', async () => {
     const lookup = vi.spyOn(dns, 'lookup')
       .mockResolvedValueOnce([{ address: PUBLIC_HOST, family: 4 }])
       .mockResolvedValueOnce([{ address: '127.0.0.1', family: 4 }]);
     try {
-      const result = await probeRemoteAsset(`http://asset.test:${port}/head-405`);
+      const result = await probeRemoteAsset(`http://asset.test:${port}/ok`);
 
-      expect(result).toMatchObject({ status: 'unreachable' });
-      expect(requests).toEqual([{ method: 'HEAD', path: '/head-405', range: undefined }]);
-      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({ status: 'reachable', httpStatus: 200 });
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(connections).toEqual([{
+        hostname: PUBLIC_HOST,
+        hostHeader: `asset.test:${port}`,
+        servername: undefined,
+      }]);
     } finally {
       lookup.mockRestore();
     }
+  });
+
+  it('preserves the original hostname as TLS SNI on a pinned HTTPS connection', async () => {
+    const lookup = vi.spyOn(dns, 'lookup').mockResolvedValue([{ address: PUBLIC_HOST, family: 4 }]);
+    try {
+      const result = await probeRemoteAsset(`https://secure.test:${port}/ok`);
+
+      expect(result).toMatchObject({ status: 'reachable', httpStatus: 200 });
+      expect(connections).toEqual([{
+        hostname: PUBLIC_HOST,
+        hostHeader: `secure.test:${port}`,
+        servername: 'secure.test',
+      }]);
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
+  it('resolves, validates, and pins again before the range GET', async () => {
+    const lookup = vi.spyOn(dns, 'lookup').mockResolvedValue([{ address: PUBLIC_HOST, family: 4 }]);
+    try {
+      const result = await probeRemoteAsset(`http://asset.test:${port}/head-405`);
+
+      expect(result).toMatchObject({ status: 'reachable', httpStatus: 206 });
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(connections.map(connection => connection.hostname)).toEqual([PUBLIC_HOST, PUBLIC_HOST]);
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+
+  it('routes a range-GET redirect through the validated redirect pipeline', async () => {
+    const result = await probeRemoteAsset(`${publicBase}/head-405-redirect`);
+
+    expect(result).toEqual({ url: `${publicBase}/ok`, status: 'reachable', httpStatus: 200 });
+    expect(requests).toEqual([
+      { method: 'HEAD', path: '/head-405-redirect', range: undefined },
+      { method: 'GET', path: '/head-405-redirect', range: 'bytes=0-0' },
+      { method: 'HEAD', path: '/ok', range: undefined },
+    ]);
+  });
+
+  it('allows only one range-GET fallback across a redirect chain', async () => {
+    const result = await probeRemoteAsset(`${publicBase}/head-405-redirect-second-fallback`);
+
+    expect(result).toMatchObject({ status: 'unreachable', httpStatus: 405 });
+    expect(requests).toEqual([
+      { method: 'HEAD', path: '/head-405-redirect-second-fallback', range: undefined },
+      { method: 'GET', path: '/head-405-redirect-second-fallback', range: 'bytes=0-0' },
+      { method: 'HEAD', path: '/head-405', range: undefined },
+    ]);
   });
 
   it('treats a terminal 404 and unsupported URL as failures', async () => {
@@ -483,6 +602,26 @@ describe('asynchronous draft inspection', () => {
       httpStatus: 200,
     });
     expect(JSON.stringify(result)).not.toMatch(/required-secret|private-fragment/);
+  });
+
+  it('rejects and probes a changed draft signature image instead of the template image', async () => {
+    const templateSignature = signatureWithAsset(`${publicBase}/ok?source=template`);
+    const draftSignature = signatureWithAsset(`${publicBase}/missing?source=draft`);
+    const result = await inspectDraft(
+      fixture({ html: `<p>One</p><p>Two</p>${draftSignature}` }),
+      { requireSignature: true },
+      templateSignature,
+    );
+
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain('Draft signature assets do not match the expected signature assets');
+    expect(result.signature.assets).toEqual([{
+      url: `${publicBase}/missing`,
+      status: 'unreachable',
+      httpStatus: 404,
+      reason: 'HTTP 404',
+    }]);
+    expect(requests.map(request => request.path)).toEqual(['/missing']);
   });
 
   it.each([
