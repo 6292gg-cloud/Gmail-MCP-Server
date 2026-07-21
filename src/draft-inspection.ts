@@ -1,4 +1,5 @@
 import { promises as dns } from 'node:dns';
+import { createHash } from 'node:crypto';
 import http, { type IncomingMessage, type RequestOptions } from 'node:http';
 import https from 'node:https';
 import { isIP } from 'node:net';
@@ -18,6 +19,7 @@ export interface InspectDraftOptions {
   requireSignature?: boolean;
   requireHtml?: boolean;
   checkRemoteSignatureAssets?: boolean;
+  includeHtmlComparisonDiagnostics?: boolean;
 }
 
 export interface ExpectedDraftHeaders {
@@ -36,6 +38,18 @@ export interface DraftInspection {
   body: { hasText: boolean; hasHtml: boolean; preview: string; textParagraphs: number; htmlBlocks: number };
   signature: { required: boolean; matches: number; images: number; assets: RemoteAssetResult[] };
   attachments: Array<{ filename: string; mimeType: string; size: number; attachmentId: string }>;
+  diagnostics?: { htmlComparison: HtmlComparisonDiagnostics };
+}
+
+interface HtmlComparisonDiagnostics {
+  actualLength: number;
+  expectedLength: number;
+  commonPrefixLength: number;
+  commonSuffixLength: number;
+  actualSha256: string;
+  expectedSha256: string;
+  actualShape: string;
+  expectedShape: string;
 }
 
 export interface RemoteAssetResult {
@@ -165,6 +179,11 @@ export function inspectDraftPayload(
     },
     attachments: content.attachments,
   };
+  if (options.includeHtmlComparisonDiagnostics && options.expectedHtmlBody !== undefined) {
+    result.diagnostics = {
+      htmlComparison: buildHtmlComparisonDiagnostics(comparableHtml, options.expectedHtmlBody),
+    };
+  }
 
   return result;
 }
@@ -351,6 +370,53 @@ function canonicalizeLineEndings(value: string): string {
 
 function canonicalizeHtmlForComparison(value: string): string {
   return canonicalizeLineEndings(value).trim();
+}
+
+function buildHtmlComparisonDiagnostics(actualHtml: string, expectedHtml: string): HtmlComparisonDiagnostics {
+  const actual = canonicalizeHtmlForComparison(actualHtml);
+  const expected = canonicalizeHtmlForComparison(expectedHtml);
+  let commonPrefixLength = 0;
+  while (
+    commonPrefixLength < actual.length
+    && commonPrefixLength < expected.length
+    && actual[commonPrefixLength] === expected[commonPrefixLength]
+  ) {
+    commonPrefixLength += 1;
+  }
+
+  let commonSuffixLength = 0;
+  while (
+    commonSuffixLength < actual.length - commonPrefixLength
+    && commonSuffixLength < expected.length - commonPrefixLength
+    && actual[actual.length - commonSuffixLength - 1] === expected[expected.length - commonSuffixLength - 1]
+  ) {
+    commonSuffixLength += 1;
+  }
+
+  return {
+    actualLength: actual.length,
+    expectedLength: expected.length,
+    commonPrefixLength,
+    commonSuffixLength,
+    actualSha256: createHash('sha256').update(actual).digest('hex'),
+    expectedSha256: createHash('sha256').update(expected).digest('hex'),
+    actualShape: describeHtmlShape(actual),
+    expectedShape: describeHtmlShape(expected),
+  };
+}
+
+function describeHtmlShape(html: string): string {
+  const tokens = html.match(/<!--[\s\S]*?-->|<\/?[a-z][^>]*>|&(?:#[xX][\da-fA-F]+|#\d+|[a-zA-Z]+);|\s+|[^<&\s]+|[<&]/g) ?? [];
+  const described = tokens.slice(0, 120).map(token => {
+    if (token.startsWith('<!--')) return '<comment>';
+    const tag = token.match(/^<(\/)?([a-z][\w:-]*)/i);
+    if (tag) return `<${tag[1] ?? ''}${tag[2].toLowerCase()}${/\/\s*>$/.test(token) ? '/' : ''}>`;
+    if (/^&/.test(token)) return '{entity}';
+    if (/^\s+$/.test(token)) return `{ws:${token.length}}`;
+    return `{text:${token.length}}`;
+  });
+  if (tokens.length > 120) described.push(`{truncated:${tokens.length - 120}}`);
+  return described.join('');
 }
 
 function removeAppliedSignatureSeparator(html: string): string {

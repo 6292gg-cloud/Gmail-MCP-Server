@@ -82,6 +82,7 @@ export const InspectDraftSchema = z.object({
   requireSignature: z.boolean().optional().default(false).describe("Require exactly one matching Gmail send-as signature"),
   requireHtml: z.boolean().optional().default(false).describe("Require an HTML body that preserves the plain-text structure"),
   checkRemoteSignatureAssets: z.boolean().optional().describe("Check required signature image URLs; defaults to requireSignature"),
+  includeHtmlComparisonDiagnostics: z.boolean().optional().default(false).describe("Opt in to privacy-safe HTML comparison lengths, hashes, and structure-only shapes; never returns body content"),
 }).superRefine((value, context) => {
   if (value.checkRemoteSignatureAssets === true && !value.requireSignature) {
     context.addIssue({

@@ -315,6 +315,27 @@ describe('draft payload inspection', () => {
     expect(diagnostics).not.toContain(expectedHtml);
   });
 
+  it('returns privacy-safe opt-in HTML comparison diagnostics', () => {
+    const actualHtml = '<p>actual-private-html</p>';
+    const expectedHtml = '<p>expected-private-html</p>';
+    const result = inspectDraftPayload(
+      fixture({ html: actualHtml }),
+      { expectedHtmlBody: expectedHtml, includeHtmlComparisonDiagnostics: true },
+    );
+
+    expect(result.diagnostics?.htmlComparison).toMatchObject({
+      actualLength: actualHtml.length,
+      expectedLength: expectedHtml.length,
+      commonPrefixLength: 3,
+      commonSuffixLength: 17,
+      actualShape: '<p>{text:19}</p>',
+      expectedShape: '<p>{text:21}</p>',
+    });
+    expect(result.diagnostics?.htmlComparison.actualSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.diagnostics?.htmlComparison.expectedSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(result.diagnostics)).not.toMatch(/actual-private|expected-private/);
+  });
+
   it('matches canonical line endings and excludes the signature plus applySignature separator from HTML', () => {
     const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>';
     const reserializedSignature = '<table class="gmail_signature"><tbody><tr><td>Trevi\n Signature</td></tr></tbody></table>';
