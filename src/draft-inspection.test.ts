@@ -342,6 +342,48 @@ describe('draft payload inspection', () => {
     expect(result.verdict).toBe('READY');
   });
 
+  it('retains unexpected trailing HTML after the matched signature for expected-body comparison', () => {
+    const signatureHtml = '<table data-wisestamp="1"><tr><td>Trevi Signature</td></tr></table>';
+    const reserializedSignature = '<div class="gmail_signature"><table aria-hidden="true"><tr><td></td></tr></table><table><tbody><tr><td>Trevi Signature</td></tr></tbody></table></div>';
+    const privateTail = '<p>unexpected-private-tail</p>';
+    const result = inspectDraftPayload(
+      fixture({
+        text: 'Expected body',
+        html: `<p>Expected body</p><br><br>${reserializedSignature}${privateTail}`,
+      }),
+      {
+        expectedBody: 'Expected body',
+        expectedHtmlBody: '<p>Expected body</p>',
+        requireSignature: true,
+        checkRemoteSignatureAssets: false,
+      },
+      signatureHtml,
+    );
+
+    expect(result.signature.matches).toBe(1);
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain('Draft HTML body does not match expected content');
+    expect(result.errors.join(' ')).not.toContain(privateTail);
+  });
+
+  it.each([
+    ['From', 'from', 'Actual Sender <actual@example.com>', 'Expected Sender <expected@example.com>'],
+    ['Cc', 'cc', 'actual-cc@example.com', ['expected-cc@example.com']],
+    ['Bcc', 'bcc', 'actual-bcc@example.com', ['expected-bcc@example.com']],
+  ] as const)('rejects a wrong %s header independently', (_label, field, actual, expected) => {
+    const draft = fixture();
+    const header = draft.message?.payload?.headers?.find(candidate => candidate.name?.toLowerCase() === field);
+    if (header) header.value = actual;
+
+    const result = inspectDraftPayload(draft, {
+      expectedHeaders: { [field]: expected },
+    });
+
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain(`Draft ${_label} header does not match expected value`);
+    expect(result.errors.join(' ')).not.toContain(actual);
+  });
+
   it('does not let a reserialized signature table hide a collapsed message body', () => {
     const signatureHtml = '<table data-wisestamp="1"><tr><td><a href="https://cdn.example.com/card?source=mail">Trevi Signature</a></td></tr></table>';
     const reserialized = '<table class="gmail_signature"><tbody><tr><td><a href="https://cdn.example.com/card#footer"> Trevi\n Signature </a></td></tr></tbody></table>';

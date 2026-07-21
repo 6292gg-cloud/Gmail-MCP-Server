@@ -95,7 +95,7 @@ export function inspectDraftPayload(
     : undefined;
   const htmlBeforeSignature = rawHtml.slice(0, signatureRegion?.start ?? rawHtml.length);
   const comparableHtml = signatureRegion
-    ? removeAppliedSignatureSeparator(htmlBeforeSignature)
+    ? `${removeAppliedSignatureSeparator(htmlBeforeSignature)}${rawHtml.slice(signatureRegion.end)}`
     : rawHtml;
   const messageHtml = comparableHtml.trim();
   const textParagraphs = countTextParagraphs(text);
@@ -433,22 +433,44 @@ function countOccurrences(value: string, search: string): number {
 
 function findSignatureRegion(bodyHtml: string, fingerprint: SignatureFingerprint): SignatureRegion | undefined {
   const lowerHtml = decodeHtmlEntities(bodyHtml).toLowerCase();
-  const candidates: number[] = [];
+  const candidates: Array<{ start: number; end: number }> = [];
   const textTokens = fingerprint.text.match(/[\p{L}\p{N}@._-]{3,}/gu) ?? [];
   for (const token of textTokens) {
     const index = lowerHtml.indexOf(token.toLowerCase());
-    if (index >= 0) candidates.push(index);
+    if (index >= 0) candidates.push({ start: index, end: index + token.length });
   }
   for (const path of fingerprint.assetPaths) {
     const index = lowerHtml.indexOf(path.toLowerCase());
-    if (index >= 0) candidates.push(index);
+    if (index >= 0) candidates.push({ start: index, end: index + path.length });
   }
   if (!candidates.length) return undefined;
 
-  const evidenceIndex = Math.min(...candidates);
-  const enclosingStart = findEnclosingBlockStart(bodyHtml, evidenceIndex);
-  const start = rewindEmptyBlockSiblings(bodyHtml, enclosingStart);
-  return { start, end: bodyHtml.length, html: bodyHtml.slice(start) };
+  const firstEvidence = Math.min(...candidates.map(candidate => candidate.start));
+  const lastEvidence = Math.max(...candidates.map(candidate => candidate.end));
+  const enclosingStart = findEnclosingBlockStart(bodyHtml, firstEvidence);
+  const fallbackStart = rewindEmptyBlockSiblings(bodyHtml, enclosingStart);
+  const start = findAppliedSignatureStart(bodyHtml, enclosingStart) ?? fallbackStart;
+  const end = findSignatureFragmentEnd(bodyHtml, start, lastEvidence) ?? lastEvidence;
+  return { start, end, html: bodyHtml.slice(start, end) };
+}
+
+function findAppliedSignatureStart(html: string, enclosingStart: number): number | undefined {
+  const prefix = html.slice(0, enclosingStart);
+  const separators = [...prefix.matchAll(/<br\s*\/?>[ \t\r\n]*<br\s*\/?>/gi)];
+  for (let index = separators.length - 1; index >= 0; index -= 1) {
+    const separator = separators[index];
+    const boundary = (separator.index ?? 0) + separator[0].length;
+    const preamble = html.slice(boundary, enclosingStart);
+    if (!normalizeText(htmlToText(preamble))) return boundary;
+  }
+  return undefined;
+}
+
+function findSignatureFragmentEnd(html: string, start: number, lastEvidence: number): number | undefined {
+  const relativeEvidence = lastEvidence - start;
+  const ranges = completedTopLevelBlocks(html.slice(start));
+  const containing = ranges.find(range => range.start <= relativeEvidence && relativeEvidence <= range.end);
+  return containing ? start + containing.end : undefined;
 }
 
 function findEnclosingBlockStart(html: string, evidenceIndex: number): number {
@@ -488,7 +510,7 @@ function rewindEmptyBlockSiblings(html: string, initialStart: number): number {
 function completedTopLevelBlocks(html: string): Array<{ start: number; end: number }> {
   const ranges: Array<{ start: number; end: number }> = [];
   const stack: Array<{ tag: string; index: number }> = [];
-  for (const match of html.matchAll(/<\/?(table|ul|ol|p)\b[^>]*>/gi)) {
+  for (const match of html.matchAll(/<\/?(div|table|ul|ol|p)\b[^>]*>/gi)) {
     const tag = match[1].toLowerCase();
     if (!match[0].startsWith('</')) {
       stack.push({ tag, index: match.index ?? 0 });
