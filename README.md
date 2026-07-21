@@ -736,12 +736,24 @@ Reads a draft without modifying it and returns `READY` or `NOT_READY`. Use it af
 ```json
 {
   "draftId": "r-example-draft",
+  "expectedHeaders": {
+    "from": "sender@example.com",
+    "to": ["recipient@example.com"],
+    "cc": [],
+    "bcc": [],
+    "subject": "Revised Report"
+  },
+  "expectedBody": "First paragraph.\n\nSecond paragraph.",
+  "expectedHtmlBody": "<p>First paragraph.</p><p>Second paragraph.</p>",
   "expectedAttachments": ["report.docx"],
   "requireSignature": true,
   "requireHtml": true,
-  "checkRemoteSignatureAssets": true
+  "checkRemoteSignatureAssets": true,
+  "includeHtmlComparisonDiagnostics": true
 }
 ```
+
+`expectedHeaders`, `expectedBody`, and `expectedHtmlBody` compare the complete rendered draft against the caller's frozen expectations; body comparison normalizes line endings but does not weaken internal content or HTML structure. `includeHtmlComparisonDiagnostics` is opt-in and returns privacy-safe lengths, SHA-256 hashes, common-prefix/suffix lengths, and tag shapes without returning the compared body text. For signatures with public assets, inspection anchors the signature boundary to those distinctive assets so generic disclaimer words that also occur in the message body cannot truncate the message during comparison. Text-only signatures use the text fingerprint path.
 
 Sanitized response example:
 
@@ -785,6 +797,8 @@ read_email(messageId)        // readback
 ```
 
 Or abort: `delete_draft(draftId)`.
+
+After rebuilding `dist`, restart the MCP client or open a fresh Codex/Claude session before testing tool availability. Existing sessions may retain the old tool list and JSON schemas, so a rebuilt `inspect_draft` or a new `update_draft` field may not appear until the session reconnects.
 
 ## Filter Management Features
 
