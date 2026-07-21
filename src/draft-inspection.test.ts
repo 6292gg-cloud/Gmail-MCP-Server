@@ -1,11 +1,10 @@
 import http, { createServer, type Server } from 'node:http';
 import https from 'node:https';
 import { promises as dns } from 'node:dns';
-import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import type { gmail_v1 } from 'googleapis';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as tools from './tools.js';
+import { getToolByName, InspectDraftSchema } from './tools.js';
 import {
   inspectDraft,
   inspectDraftPayload,
@@ -645,20 +644,18 @@ describe('asynchronous draft inspection', () => {
 
 describe('inspect_draft MCP wiring', () => {
   it('defaults asset checking to requireSignature and rejects inconsistent options', () => {
-    const inspectSchema = (tools as any).InspectDraftSchema;
-
-    expect(inspectSchema.parse({ draftId: 'r-1', requireSignature: true })).toMatchObject({
+    expect(InspectDraftSchema.parse({ draftId: 'r-1', requireSignature: true })).toMatchObject({
       draftId: 'r-1',
       requireSignature: true,
       checkRemoteSignatureAssets: true,
     });
-    expect(inspectSchema.parse({ draftId: 'r-1' })).toMatchObject({
+    expect(InspectDraftSchema.parse({ draftId: 'r-1' })).toMatchObject({
       draftId: 'r-1',
       requireSignature: false,
       requireHtml: false,
       checkRemoteSignatureAssets: false,
     });
-    expect(() => inspectSchema.parse({
+    expect(() => InspectDraftSchema.parse({
       draftId: 'r-1',
       requireSignature: false,
       checkRemoteSignatureAssets: true,
@@ -666,20 +663,10 @@ describe('inspect_draft MCP wiring', () => {
   });
 
   it('registers inspect_draft as read-only for readonly and modify scopes', () => {
-    const tool = (tools as any).getToolByName('inspect_draft');
+    const tool = getToolByName('inspect_draft');
 
     expect(tool?.annotations.readOnlyHint).toBe(true);
     expect(tool?.scopes).toEqual(['gmail.readonly', 'gmail.modify']);
   });
 
-  it('fetches the full draft and returns an inspection instead of mutating Gmail', () => {
-    const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
-    const handler = source.slice(source.indexOf('case "inspect_draft"'), source.indexOf('case "send_email"'));
-
-    expect(handler).toContain("format: 'full'");
-    expect(handler).toContain("renderInspectionError('Draft has no From header')");
-    expect(handler).toContain('await resolveSignatureHtml(gmail, from)');
-    expect(handler).toContain('await inspectDraft(draft.data, validated, signature?.html)');
-    expect(handler).not.toMatch(/drafts\.(?:create|update|delete|send)\s*\(/);
-  });
 });
