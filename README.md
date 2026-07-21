@@ -32,7 +32,7 @@ There's a downstream fork that took this in the **maximalist** direction. I'm no
 - **Draft lifecycle tools** — `send_draft`, `delete_draft`, `update_draft` close the orphan-draft gap: `send_draft` atomically sends an existing draft and removes it from Drafts (no ghost copy); `update_draft` mutates a draft in place preserving its ID (no draft pile-up across iteration loops); `delete_draft` discards an abandoned draft ([PR #30](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/30) by [@thisisambros](https://github.com/thisisambros))
 - **Tool annotations** — MCP spec annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on all tools for safer LLM tool execution ([PR #14](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/14) by [@bryankthompson](https://github.com/bryankthompson))
 - **Download email tool** — `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
-- **Signature support** — opt-in `includeSignature` on `send_email`/`draft_email` fetches the sender's Gmail send-as signature (`users.settings.sendAs.get`) and appends its HTML to the body. Closes a Gmail-web gap: web-compose never injects the signature into API-created drafts, so without this the signature (and its logo/social images) is simply absent. See **Signature behaviour** below for the why and the limits.
+- **Verified draft workflow** — `includeSignature` on `draft_email` and `update_draft` appends and de-duplicates the sender's Gmail send-as signature; read-only `inspect_draft` reports `READY` or `NOT_READY` with bounded MIME, formatting, signature, remote-asset, and attachment diagnostics before an explicit `send_draft`.
 
 All features are production-tested in daily use.
 
@@ -264,7 +264,7 @@ The server automatically filters available tools based on your authorized scopes
 
 | Tools | Required Scope (any) |
 |-------|---------------------|
-| `read_email`, `search_emails`, `download_attachment` | `gmail.readonly` or `gmail.modify` |
+| `read_email`, `search_emails`, `download_attachment`, `inspect_draft` | `gmail.readonly` or `gmail.modify` |
 | `list_email_labels` | `gmail.readonly`, `gmail.modify`, or `gmail.labels` |
 | `send_email`, `draft_email`, `reply_all`, `send_draft` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
 | `delete_draft`, `update_draft` | `gmail.modify` or `gmail.compose` |
@@ -424,18 +424,18 @@ Creates a draft email without sending it. **Also supports attachments**.
 
 Gmail's web composer auto-inserts your send-as signature **only when you compose in the browser**. When a draft is created through the API and you later open it in web-compose to review/send, Gmail does **not** inject the signature — so API-created drafts arrive with no signature and no signature images. This is a Gmail-side behaviour, not a bug in this server.
 
-Set `includeSignature: true` (default `false`) and the server will:
+Set `includeSignature: true` (default `false`) on either `draft_email` or `update_draft` and the server will:
 
 1. Fetch the signature for the resolved send-as alias via `users.settings.sendAs.list` (matches the `from` address, else the default/primary alias). Requires the `gmail.settings.basic` scope (in `DEFAULT_SCOPES`).
 2. Append the signature HTML after the body and promote the message to `multipart/alternative` so the HTML part is present.
 
 **Images:** signature images render as long as they are referenced by **publicly reachable URLs** (e.g. WiseStamp/CloudFront-hosted icons and logos — verified end-to-end: an 8-image WiseStamp signature round-trips into the draft with all image URLs intact). Signatures whose images are stored as Gmail-internal/`cid:` inline parts are **not** supported — those URLs aren't publicly fetchable, so they'd render broken; embedding them would require downloading each image and re-attaching it as an inline MIME part, which this fork deliberately does not do.
 
-**Notes & limits:**
-- Opt-in by design — defaulting off avoids appending a signature to automated/internal drafts.
-- No de-duplication: if the body already contains a signature, you'll get two. Don't combine a hand-written signature with `includeSignature: true`.
-- Degraded-not-broken: if the signature fetch fails (scope/network), the draft is still created without a signature and a warning is logged.
-- Applies to both the no-attachment and attachment paths, and to `send_email`. **Not** wired into `update_draft`.
+**Statuses and limits:**
+- `not_requested`: `includeSignature` was omitted or false. `applied`: the resolved send-as signature was appended. `already_present`: its fingerprint was already in the HTML body, so it was not appended again. `missing` or `error`: the draft/update still completes without a signature and returns a warning.
+- Duplicate prevention compares the resolved signature fingerprint with the resulting HTML. Do not rely on it to preserve a separately hand-authored signature that differs from the configured Gmail signature.
+- The behavior applies to attachment and no-attachment paths, `send_email`, `draft_email`, and `update_draft`.
+- Public `https:`/`http:` signature assets, including WiseStamp-hosted images, can be checked by `inspect_draft`. Gmail-internal `cid:` images are not embedded or supported. MIME construction and Gmail rendering are not pixel-perfect guarantees.
 
 ### 3. Read Email (`read_email`)
 Retrieves the content of a specific email by its ID. **Now shows enhanced attachment information**.
@@ -478,6 +478,8 @@ Parameters:
 - `attachmentId`: The attachment ID (shown in enhanced email display)
 - `savePath`: Directory to save the file (optional, defaults to current directory)
 - `filename`: Custom filename (optional, uses original filename if not provided)
+
+Use `download_attachment` for incoming files; do not use a browser download as an attachment hand-off. For outgoing attachments, pass accessible **absolute local file paths** in the `attachments` array to `draft_email`, `update_draft`, or `send_email`.
 
 ### 5. Search Emails (`search_emails`)
 Searches for emails using Gmail search syntax.
@@ -723,11 +725,41 @@ Replaces a draft's content in place via `users.drafts.update`, **preserving the 
   "subject": "Revised Report",
   "body": "Updated draft content.",
   "cc": ["manager@example.com"],
-  "attachments": ["/path/to/report.docx"]
+  "attachments": ["/absolute/path/to/report.docx"],
+  "includeSignature": true
 }
 ```
 
-### 26. Delete Draft (`delete_draft`)
+### 26. Inspect Draft (`inspect_draft`)
+Reads a draft without modifying it and returns `READY` or `NOT_READY`. Use it after each create or update before sending. `requireSignature` requires exactly one configured send-as signature; `requireHtml` requires an HTML body that preserves the plain-text paragraph structure. `checkRemoteSignatureAssets` defaults to `requireSignature` and may only be true when `requireSignature` is true.
+
+```json
+{
+  "draftId": "r-example-draft",
+  "expectedAttachments": ["report.docx"],
+  "requireSignature": true,
+  "requireHtml": true,
+  "checkRemoteSignatureAssets": true
+}
+```
+
+Sanitized response example:
+
+```json
+{
+  "verdict": "READY",
+  "errors": [],
+  "warnings": [],
+  "headers": { "from": "", "to": "", "cc": "", "bcc": "", "subject": "", "threadId": "" },
+  "body": { "hasText": true, "hasHtml": true, "preview": "Example message", "textParagraphs": 1, "htmlBlocks": 1 },
+  "signature": { "required": true, "matches": 1, "images": 1, "assets": [{ "url": "https://assets.example.invalid/logo.png", "status": "reachable" }] },
+  "attachments": [{ "filename": "report.docx", "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "size": 1024, "attachmentId": "" }]
+}
+```
+
+`NOT_READY` includes bounded `errors` for missing or duplicate signatures, unreachable signature assets, formatting failures, zero-byte attachments, or an attachment mismatch. Inspection validates rendered MIME and reachable public assets; it does not guarantee a pixel-perfect Gmail UI rendering.
+
+### 27. Delete Draft (`delete_draft`)
 Discards an abandoned draft via `users.drafts.delete`.
 
 ```json
@@ -740,10 +772,16 @@ Discards an abandoned draft via `users.drafts.delete`.
 
 ```
 draft_email(...) → draftId
+  ↓
+inspect_draft(draftId, expectations) → READY
   ↓ (user wants changes)
 update_draft(draftId, ...)   // mutate in place, same ID
-  ↓ (user confirms)
-send_draft(draftId)          // atomic send + draft removal
+  ↓
+inspect_draft(draftId, expectations) → READY
+  ↓ (explicit user approval)
+send_draft(draftId) → messageId
+  ↓
+read_email(messageId)        // readback
 ```
 
 Or abort: `delete_draft(draftId)`.
