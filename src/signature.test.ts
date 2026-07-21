@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import * as tools from './tools.js';
 import {
   applySignature,
   NO_SIGNATURE_WARNING,
@@ -12,6 +14,16 @@ function clientArgs(): EmailMessageArgs {
     subject: 'Subject',
     body: 'Hello\n\nRegards',
     includeSignature: true,
+  };
+}
+
+function validUpdate(overrides: Record<string, unknown> = {}) {
+  return {
+    draftId: 'r-1',
+    to: ['recipient@example.com'],
+    subject: 'Subject',
+    body: 'Hello',
+    ...overrides,
   };
 }
 
@@ -96,5 +108,27 @@ describe('signature application', () => {
     expect(result.status).toBe(expected);
     expect(result.warning).toBeTruthy();
     if (expected === 'missing') expect(result.warning).toBe(NO_SIGNATURE_WARNING);
+  });
+});
+
+describe('update draft signature wiring', () => {
+  it('accepts includeSignature and defaults it exactly like send_email', () => {
+    const updateSchema = (tools as any).UpdateDraftSchema;
+
+    expect(updateSchema.parse(validUpdate({ includeSignature: true })).includeSignature).toBe(true);
+    expect(updateSchema.parse(validUpdate()).includeSignature).toBe(false);
+    expect(updateSchema.shape.includeSignature.description)
+      .toBe((tools as any).SendEmailSchema.shape.includeSignature.description);
+  });
+
+  it('applies the signature before rebuilding an updated draft and reports its status', () => {
+    const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
+    const handler = source.slice(source.indexOf('case "update_draft"'), source.indexOf('case "list_email_labels"'));
+
+    expect(handler).toContain('await applySignature(gmail, messageArgs)');
+    expect(handler).toContain('signature.args');
+    expect(handler).toContain('signedMessageArgs.attachments');
+    expect(handler).toContain('signedMessageArgs.threadId');
+    expect(handler).toContain('Signature: ${signature.status}');
   });
 });

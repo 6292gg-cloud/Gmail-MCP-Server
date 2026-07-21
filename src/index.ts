@@ -18,9 +18,10 @@ import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
-import { applySignature } from "./signature.js";
+import { applySignature, resolveSignatureHtml } from "./signature.js";
+import { inspectDraft, type DraftInspection } from "./draft-inspection.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema, UpdateDraftSchema, InspectDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,19 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
 const OAUTH_PATH = process.env.GMAIL_OAUTH_PATH || path.join(CONFIG_DIR, 'gcp-oauth.keys.json');
 const CREDENTIALS_PATH = process.env.GMAIL_CREDENTIALS_PATH || path.join(CONFIG_DIR, 'credentials.json');
+
+function renderInspectionError(message: string) {
+    const inspection: DraftInspection = {
+        verdict: 'NOT_READY',
+        errors: [message],
+        warnings: [],
+        headers: { from: '', to: '', cc: '', bcc: '', subject: '', threadId: '' },
+        body: { hasText: false, hasHtml: false, preview: '', textParagraphs: 0, htmlBlocks: 0 },
+        signature: { required: true, matches: 0, images: 0, assets: [] },
+        attachments: [],
+    };
+    return { content: [{ type: 'text' as const, text: JSON.stringify(inspection, null, 2) }] };
+}
 
 // Optional tool-name prefix — lets multiple instances of this server run side-by-side
 // without their tool names colliding in clients that disambiguate by base name.
@@ -558,6 +572,29 @@ async function main() {
 
         try {
             switch (name) {
+                case "inspect_draft": {
+                    const validated = InspectDraftSchema.parse(args);
+                    const draft = await gmail.users.drafts.get({
+                        userId: 'me',
+                        id: validated.draftId,
+                        format: 'full',
+                    });
+                    const from = draft.data.message?.payload?.headers?.find(
+                        header => header.name?.toLowerCase() === 'from'
+                    )?.value ?? undefined;
+                    if (validated.requireSignature && !from) {
+                        return renderInspectionError('Draft has no From header');
+                    }
+                    const signature = validated.requireSignature
+                        ? await resolveSignatureHtml(gmail, from)
+                        : undefined;
+                    const inspection = await inspectDraft(draft.data, validated, signature?.html);
+                    if (signature?.warning) inspection.warnings.push(signature.warning);
+                    return {
+                        content: [{ type: 'text', text: JSON.stringify(inspection, null, 2) }],
+                    };
+                }
+
                 case "send_email":
                 case "draft_email": {
                     const validatedArgs = SendEmailSchema.parse(args);
@@ -807,13 +844,15 @@ async function main() {
                 case "update_draft": {
                     const validatedArgs = UpdateDraftSchema.parse(args);
                     const { draftId, ...messageArgs } = validatedArgs;
+                    const signature = await applySignature(gmail, messageArgs);
+                    const signedMessageArgs = signature.args;
 
                     // Build the new MIME message using the same helpers as draft_email/send_email
                     let message: string;
-                    if (messageArgs.attachments && messageArgs.attachments.length > 0) {
-                        message = await createEmailWithNodemailer(messageArgs);
+                    if (signedMessageArgs.attachments && signedMessageArgs.attachments.length > 0) {
+                        message = await createEmailWithNodemailer(signedMessageArgs);
                     } else {
-                        message = createEmailMessage(messageArgs);
+                        message = createEmailMessage(signedMessageArgs);
                     }
 
                     const encodedMessage = Buffer.from(message).toString('base64')
@@ -822,9 +861,9 @@ async function main() {
                         .replace(/=+$/, '');
 
                     const messageRequest: any = { raw: encodedMessage };
-                    if (messageArgs.threadId) messageRequest.threadId = messageArgs.threadId;
+                    if (signedMessageArgs.threadId) messageRequest.threadId = signedMessageArgs.threadId;
 
-                    const response = await gmail.users.drafts.update({
+                    await gmail.users.drafts.update({
                         userId: 'me',
                         id: draftId,
                         requestBody: { message: messageRequest },
@@ -834,7 +873,7 @@ async function main() {
                         content: [
                             {
                                 type: "text",
-                                text: `Draft ${draftId} updated successfully (draft ID unchanged, content replaced).`,
+                                text: `Draft ${draftId} updated successfully (draft ID unchanged, content replaced).\nSignature: ${signature.status}${signature.warning ? `\nWarning: ${signature.warning}` : ''}`,
                             },
                         ],
                     };

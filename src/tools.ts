@@ -2,6 +2,8 @@ import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 // Schema definitions
+const IncludeSignatureSchema = z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature (users.settings.sendAs.get) and append its HTML to the body. The draft becomes HTML (multipart/alternative). Use for client-facing drafts — Gmail web compose does NOT auto-insert the signature into API-created drafts, so this is the only way to get the signature (incl. images hosted on public CDN URLs) into the draft. Default false to avoid surprising automated/internal drafts.");
+
 export const SendEmailSchema = z.object({
   to: z.array(z.string()).describe("List of recipient email addresses"),
   subject: z.string().describe("Email subject"),
@@ -14,7 +16,7 @@ export const SendEmailSchema = z.object({
   threadId: z.string().optional().describe("Thread ID to reply to"),
   inReplyTo: z.string().optional().describe("Message ID being replied to"),
   attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
-  includeSignature: z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature (users.settings.sendAs.get) and append its HTML to the body. The draft becomes HTML (multipart/alternative). Use for client-facing drafts — Gmail web compose does NOT auto-insert the signature into API-created drafts, so this is the only way to get the signature (incl. images hosted on public CDN URLs) into the draft. Default false to avoid surprising automated/internal drafts."),
+  includeSignature: IncludeSignatureSchema,
 });
 
 export const ReadEmailSchema = z.object({
@@ -58,8 +60,29 @@ export const UpdateDraftSchema = z.object({
   bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
   threadId: z.string().optional().describe("Thread ID to reply to"),
   inReplyTo: z.string().optional().describe("Message ID being replied to"),
+  references: z.string().optional().describe("References header chain for threaded replies"),
   attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
+  includeSignature: IncludeSignatureSchema,
 });
+
+export const InspectDraftSchema = z.object({
+  draftId: z.string().describe("ID of the draft to inspect"),
+  expectedAttachments: z.array(z.string()).optional().describe("Exact attachment basenames expected on the draft"),
+  requireSignature: z.boolean().optional().default(false).describe("Require exactly one matching Gmail send-as signature"),
+  requireHtml: z.boolean().optional().default(false).describe("Require an HTML body that preserves the plain-text structure"),
+  checkRemoteSignatureAssets: z.boolean().optional().describe("Check required signature image URLs; defaults to requireSignature"),
+}).superRefine((value, context) => {
+  if (value.checkRemoteSignatureAssets === true && !value.requireSignature) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["checkRemoteSignatureAssets"],
+      message: "Remote signature assets can only be checked when requireSignature is true",
+    });
+  }
+}).transform(value => ({
+  ...value,
+  checkRemoteSignatureAssets: value.checkRemoteSignatureAssets ?? value.requireSignature,
+}));
 
 export const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
 
@@ -237,6 +260,13 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: DownloadAttachmentSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
     annotations: { title: "Download Attachment", readOnlyHint: true },
+  },
+  {
+    name: "inspect_draft",
+    description: "Inspects a Gmail draft's rendered MIME, signature, formatting, and attachments without modifying it. Returns READY or NOT_READY with bounded diagnostics.",
+    schema: InspectDraftSchema,
+    scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Inspect Draft", readOnlyHint: true },
   },
 
   // Thread-level operations
