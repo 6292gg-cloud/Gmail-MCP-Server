@@ -226,6 +226,16 @@ afterAll(async () => {
 });
 
 describe('draft payload inspection', () => {
+  it('identifies the current message behind a draft so a full edit can recover its payload', () => {
+    const draft = fixture({ attachments: ['keep.pdf'] });
+    const first = inspectDraftPayload(draft, {});
+    expect(first).toHaveProperty('messageId', 'message-1');
+    draft.message!.id = 'message-after-user-edit';
+    const current = inspectDraftPayload(draft, {});
+    expect(current).toHaveProperty('messageId', 'message-after-user-edit');
+    expect(current.attachments[0].filename).toBe('keep.pdf');
+  });
+
   it('fails a multi-paragraph message whose HTML collapsed into one block', () => {
     const result = inspectDraftPayload(
       fixture({ text: 'One\n\nTwo', html: '<div>One Two</div>' }),

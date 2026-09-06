@@ -6,7 +6,7 @@ import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { google } from 'googleapis';
+import { gmail as createGmail } from 'googleapis/build/src/apis/gmail/index.js';
 import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
@@ -23,6 +23,8 @@ import { handleInspectDraft, handleUpdateDraft, renderToolError } from "./draft-
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, ReportPhishingSchema, BatchReportPhishingSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ModifyThreadSchema, SendDraftSchema, DeleteDraftSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
+import { createAccountContext, resolveToolName } from "./account-context.js";
+import { GetAccountContextSchema } from "./tools.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -153,71 +155,61 @@ function extractAttachments(payload: GmailMessagePart): EmailAttachment[] {
     return attachments;
 }
 
-async function loadCredentials() {
+class GmailStartupError extends Error {}
+
+function configurationObject(value: unknown): value is Record<string, any> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readConfigurationFile(file: string, kind: 'OAUTH' | 'CREDENTIALS'): Record<string, any> {
+    if (!fs.existsSync(file)) {
+        throw new GmailStartupError(`GMAIL_${kind}_MISSING: Configure the selected account's ${kind === 'OAUTH' ? 'OAuth client' : 'credentials'} file before starting the server.`);
+    }
     try {
-        // Create config directory if it doesn't exist
-        if (!process.env.GMAIL_OAUTH_PATH && !process.env.GMAIL_CREDENTIALS_PATH && !fs.existsSync(CONFIG_DIR)) {
-            fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+        const value: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (configurationObject(value)) return value;
+    } catch {
+        // JSON/read errors may contain sensitive file contents or paths.
+    }
+    throw new GmailStartupError(`GMAIL_${kind}_INVALID: The selected account's configuration file is unreadable or invalid.`);
+}
+
+async function loadCredentials() {
+    const authMode = process.argv[2] === 'auth';
+    const localOAuthPath = path.join(process.cwd(), 'gcp-oauth.keys.json');
+
+    // Only explicit setup may bootstrap a missing default OAuth file. Serving is
+    // read-only, and a cwd file must never replace an explicitly selected client.
+    if (authMode && !process.env.GMAIL_OAUTH_PATH && !fs.existsSync(OAUTH_PATH) && fs.existsSync(localOAuthPath)) {
+        fs.mkdirSync(path.dirname(OAUTH_PATH), { recursive: true, mode: 0o700 });
+        fs.copyFileSync(localOAuthPath, OAUTH_PATH, fs.constants.COPYFILE_EXCL);
+    }
+
+    const keysContent = readConfigurationFile(OAUTH_PATH, 'OAUTH');
+    const keys = keysContent.installed || keysContent.web;
+    if (!configurationObject(keys) || typeof keys.client_id !== 'string' || !keys.client_id.trim()
+        || typeof keys.client_secret !== 'string' || !keys.client_secret.trim()) {
+        throw new GmailStartupError('GMAIL_OAUTH_INVALID: The OAuth file must contain installed or web client credentials.');
+    }
+
+    const callbackArg = process.argv.find(arg => arg.startsWith('http://') || arg.startsWith('https://'));
+    oauth2Client = new OAuth2Client(keys.client_id, keys.client_secret, callbackArg || 'http://localhost:3000/oauth2callback');
+
+    // Auth must work before tokens exist and must also repair malformed old tokens.
+    if (authMode) return;
+
+    const credentials = readConfigurationFile(CREDENTIALS_PATH, 'CREDENTIALS');
+    const tokens = Object.prototype.hasOwnProperty.call(credentials, 'tokens') ? credentials.tokens : credentials;
+    const nonemptyToken = (value: unknown) => typeof value === 'string' && value.trim().length > 0;
+    if (!configurationObject(tokens) || (!nonemptyToken(tokens.refresh_token) && !nonemptyToken(tokens.access_token))) {
+        throw new GmailStartupError('GMAIL_CREDENTIALS_INVALID: The selected account requires an access token or refresh token.');
+    }
+    oauth2Client.setCredentials(tokens);
+    if (credentials.scopes !== undefined) {
+        if (!Array.isArray(credentials.scopes) || !credentials.scopes.every(nonemptyToken)) {
+            throw new GmailStartupError('GMAIL_CREDENTIALS_INVALID: Authorized scopes must be an array of scope names.');
         }
-
-        // Check for OAuth keys in current directory first, then in config directory
-        const localOAuthPath = path.join(process.cwd(), 'gcp-oauth.keys.json');
-        let oauthPath = OAUTH_PATH;
-
-        if (fs.existsSync(localOAuthPath)) {
-            // If found in current directory, copy to config directory
-            fs.copyFileSync(localOAuthPath, OAUTH_PATH);
-            console.log('OAuth keys found in current directory, copied to global config.');
-        }
-
-        if (!fs.existsSync(OAUTH_PATH)) {
-            console.error('Error: OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or', CONFIG_DIR);
-            process.exit(1);
-        }
-
-        const keysContent = JSON.parse(fs.readFileSync(OAUTH_PATH, 'utf8'));
-        const keys = keysContent.installed || keysContent.web;
-
-        if (!keys) {
-            console.error('Error: Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
-            process.exit(1);
-        }
-
-        // Parse callback URL from args (must be a URL, not a flag)
-        // Supports: node index.js auth https://example.com/callback
-        // Or: node index.js auth --scopes=gmail.readonly (uses default callback)
-        const callbackArg = process.argv.find(arg =>
-            arg.startsWith('http://') || arg.startsWith('https://')
-        );
-        const callback = callbackArg || "http://localhost:3000/oauth2callback";
-
-        oauth2Client = new OAuth2Client(
-            keys.client_id,
-            keys.client_secret,
-            callback
-        );
-
-        if (fs.existsSync(CREDENTIALS_PATH)) {
-            const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-
-            // Credentials file structure (v1.2.0+):
-            //   { "tokens": { access_token, refresh_token, ... }, "scopes": ["gmail.readonly", ...] }
-            //
-            // Legacy structure (pre-v1.2.0):
-            //   { access_token, refresh_token, ... }
-            //
-            // We support both formats for backwards compatibility. Users with legacy
-            // credentials will get DEFAULT_SCOPES (full access) until they re-authenticate.
-            const tokens = credentials.tokens || credentials;
-            oauth2Client.setCredentials(tokens);
-
-            if (credentials.scopes) {
-                authorizedScopes = credentials.scopes;
-            }
-        }
-    } catch (error) {
-        console.error('Error loading credentials:', error);
-        process.exit(1);
+        authorizedScopes = credentials.scopes;
     }
 }
 
@@ -307,7 +299,18 @@ async function main() {
     }
 
     // Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const gmail = createGmail({ version: 'v1', auth: oauth2Client });
+    const account = createAccountContext({
+        email: process.env.GMAIL_ACCOUNT_EMAIL,
+        label: process.env.GMAIL_ACCOUNT_LABEL,
+        toolPrefix: TOOL_PREFIX,
+    }, async () => {
+        const profile = await gmail.users.getProfile(
+            { userId: 'me', fields: 'emailAddress' },
+            { timeout: 10_000, retry: false },
+        );
+        return profile.data;
+    });
 
     // Server implementation
     const server = new Server(
@@ -331,32 +334,14 @@ async function main() {
         const mcpTools = toMcpTools(availableTools);
         // Apply optional TOOL_PREFIX so multiple server instances can coexist
         // in clients that dedupe tool entries by base name.
-        return { tools: mcpTools.map(t => ({ ...t, name: TOOL_PREFIX + t.name })) };
+        return { tools: mcpTools.map(t => ({
+            ...t,
+            name: TOOL_PREFIX + t.name,
+            description: account.describeTool(t.description),
+        })) };
     });
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-        const { name: rawName, arguments: args } = request.params;
-
-        // Strip TOOL_PREFIX only if the result is a known base tool name.
-        // Guards against accidental over-stripping when the prefix overlaps a tool name's start
-        // (e.g. prefix="send_" + rawName="send_email" → "email", which is not a tool).
-        const stripped = TOOL_PREFIX && rawName.startsWith(TOOL_PREFIX)
-            ? rawName.slice(TOOL_PREFIX.length)
-            : rawName;
-        const name = getToolByName(stripped) ? stripped : rawName;
-
-        // Verify the tool is authorized for the current scopes
-        // This guards against direct tool calls that bypass ListTools
-        const toolDef = getToolByName(name);
-        if (!toolDef || !hasScope(authorizedScopes, toolDef.scopes)) {
-            return {
-                content: [{
-                    type: "text",
-                    text: `Error: Tool "${name}" is not available. You may need to re-authenticate with additional scopes.`,
-                }],
-            };
-        }
-
+    async function handleTool(name: string, args: unknown) {
         async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
             let message: string;
 
@@ -559,6 +544,12 @@ async function main() {
 
         try {
             switch (name) {
+                case "get_account_context": {
+                    GetAccountContextSchema.parse(args ?? {});
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(await account.ensureVerified(), null, 2) }],
+                    };
+                }
                 case "inspect_draft": {
                     return await handleInspectDraft(gmail, args);
                 }
@@ -1681,13 +1672,26 @@ async function main() {
         } catch (error: unknown) {
             return renderToolError(error);
         }
+    }
+
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        try {
+            const name = resolveToolName(request.params.name, TOOL_PREFIX, base => Boolean(getToolByName(base)));
+            const tool = getToolByName(name)!;
+            if (!hasScope(authorizedScopes, tool.scopes)) {
+                return renderToolError(new Error('This tool is not available for the selected Gmail account scopes.'));
+            }
+            return await account.run(() => handleTool(name, request.params.arguments));
+        } catch (error) {
+            return renderToolError(error);
+        }
     });
 
     const transport = new StdioServerTransport();
-    server.connect(transport);
+    await server.connect(transport);
 }
 
 main().catch((error) => {
-    console.error('Server error:', error);
+    console.error(error instanceof GmailStartupError ? error.message : 'GMAIL_STARTUP_FAILED: Unable to initialize the selected Gmail server.');
     process.exit(1);
 });

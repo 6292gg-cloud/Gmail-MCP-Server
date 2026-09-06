@@ -2,6 +2,8 @@ import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 // Schema definitions
+export const GetAccountContextSchema = z.object({}).strict();
+
 const IncludeSignatureSchema = z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature (users.settings.sendAs.get) and append its HTML to the body. The draft becomes HTML (multipart/alternative). Use for client-facing drafts — Gmail web compose does NOT auto-insert the signature into API-created drafts, so this is the only way to get the signature (incl. images hosted on public CDN URLs) into the draft. Default false to avoid surprising automated/internal drafts.");
 
 export const SendEmailSchema = z.object({
@@ -251,6 +253,13 @@ export interface ToolDefinition {
 
 // Tool registry with scope requirements
 export const toolDefinitions: ToolDefinition[] = [
+  {
+    name: "get_account_context",
+    description: "Verifies and returns the mailbox identity and purpose bound to this Gmail instance. Reads profile identity only, without reading messages or changing Gmail.",
+    schema: GetAccountContextSchema,
+    scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "Get Gmail Account Context", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
   // Read-only email operations
   {
     name: "read_email",

@@ -123,6 +123,7 @@ export function renderToolError(error: unknown) {
 
 function renderInspectionError(message: string) {
   const inspection: DraftInspection = {
+    messageId: '',
     verdict: 'NOT_READY',
     errors: [message],
     warnings: [],

@@ -332,7 +332,9 @@ This enables all 23 tools including sending emails, managing labels, creating fi
 
 Some MCP clients dedupe tool entries by their base name across servers, which makes it impossible to run two instances of this server side-by-side (e.g. one for a personal account and one for a shared inbox) — only one instance's tools surface, even though both servers report as connected.
 
-The server accepts an optional `--tool-prefix=<value>` CLI flag (or `GMAIL_MCP_TOOL_PREFIX` env var) that is prepended to every tool name at registration. Default is empty (fully backward-compatible).
+The server accepts an optional `--tool-prefix=<value>` / `--tool-prefix <value>` CLI flag, which takes precedence over the `GMAIL_MCP_TOOL_PREFIX` env var. The prefix is prepended to every advertised tool name; its default is empty.
+
+For each prefixed instance, set `GMAIL_ACCOUNT_EMAIL` to the exact primary mailbox returned by Gmail's profile API and `GMAIL_ACCOUNT_LABEL` to a short description of its purpose. The email is required; the label is optional and defaults to the configured email. Use a distinct `GMAIL_CREDENTIALS_PATH` for each mailbox. These settings identify the authenticated mailbox; they do not select a send-as alias or change OAuth permissions.
 
 Example: register two instances with distinct prefixes in Claude Code:
 
@@ -340,14 +342,23 @@ Example: register two instances with distinct prefixes in Claude Code:
 # Personal account
 claude mcp add gmail-personal -s user \
   -e GMAIL_CREDENTIALS_PATH=$HOME/.gmail-mcp/credentials-personal.json \
+  -e GMAIL_ACCOUNT_EMAIL=owner@example.com \
+  -e "GMAIL_ACCOUNT_LABEL=Owner business correspondence" \
   -- node /absolute/path/to/Gmail-MCP-Server/dist/index.js --tool-prefix=personal_
 
 # Shared inbox
 claude mcp add gmail-info -s user \
+  -e GMAIL_CREDENTIALS_PATH=$HOME/.gmail-mcp/credentials-info.json \
+  -e GMAIL_ACCOUNT_EMAIL=info@example.com \
+  -e "GMAIL_ACCOUNT_LABEL=Shared business inbox" \
   -- node /absolute/path/to/Gmail-MCP-Server/dist/index.js --tool-prefix=info_
 ```
 
-Tools then surface as `mcp__gmail-personal__personal_search_emails`, `mcp__gmail-info__info_search_emails`, etc. — distinct at every layer. The dispatch handler strips the prefix and looks up the resolved name via `getToolByName`; only strips when the result is a known tool (so a prefix value that overlaps a real tool name cannot cause silent mis-dispatch).
+Tools then surface as `mcp__gmail-personal__personal_search_emails`, `mcp__gmail-info__info_search_emails`, etc. The server accepts only its exact advertised tool names. A prefixed instance rejects bare names, another instance's prefix and unknown names; for example, prefix `send_` advertises `send_send_email`, not `send_email`. An explicitly unprefixed instance with no configured email retains legacy behavior and reports its identity as unverified.
+
+Startup and tool discovery do not contact Gmail. Before the first tool operation, the server verifies the configured email with `users.getProfile`; concurrent checks share one request, and a successful result is cached for that process. Missing or invalid identity, an account mismatch, or a failed profile check blocks the operation without trying another mailbox. The profile check requires credentials with `gmail.readonly` or `gmail.modify`; compose-only or send-only credentials cannot verify a bound instance. `<prefix>get_account_context` returns the verified identity without reading messages. Tool descriptions show the configured mailbox and purpose, and successful verification adds `_meta.gmailAccount` alongside the existing response content.
+
+After updating the server build, credentials or environment settings, restart that MCP connection and refresh the client's tool catalog. Existing Claude/Codex sessions can retain old processes or schemas; use a fresh connection and its `get_account_context` result to verify the new configuration. Update all prefixed registrations with `GMAIL_ACCOUNT_EMAIL` before starting the new build. A connected status alone does not prove the mailbox identity was verified.
 
 The `auth` subcommand runs before the server starts and is unaffected — invoke it without `--tool-prefix`.
 

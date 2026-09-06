@@ -31,6 +31,7 @@ export interface ExpectedDraftHeaders {
 }
 
 export interface DraftInspection {
+  messageId: string;
   verdict: 'READY' | 'NOT_READY';
   errors: string[];
   warnings: string[];
@@ -153,6 +154,7 @@ export function inspectDraftPayload(
   validateExpectedHeaders(headers, options.expectedHeaders, errors);
   validateExpectedBody(rawText, comparableHtml, options, errors);
   const result: DraftInspection = {
+    messageId: draft.message?.id ?? '',
     verdict: errors.length ? 'NOT_READY' : 'READY',
     errors,
     warnings,
