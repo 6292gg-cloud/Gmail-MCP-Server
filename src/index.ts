@@ -2,6 +2,8 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { pathToFileURL } from 'node:url';
+import fsEntry from 'node:fs';
 import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
@@ -266,38 +268,8 @@ async function authenticate(scopes: string[]) {
 }
 
 // Main function
-async function main() {
-    await loadCredentials();
-
-    if (process.argv[2] === 'auth') {
-        // Parse --scopes flag from CLI arguments
-        // Usage: node dist/index.js auth --scopes=<scope1,scope2,...>
-        // Example: node dist/index.js auth --scopes=gmail.readonly
-        // Example: node dist/index.js auth --scopes=gmail.readonly,gmail.settings.basic
-        const scopesArg = process.argv.find(arg => arg.startsWith('--scopes='));
-        let scopes = DEFAULT_SCOPES;
-
-        if (scopesArg) {
-            const scopesValue = scopesArg.slice('--scopes='.length);
-            scopes = parseScopes(scopesValue);
-            const validation = validateScopes(scopes);
-
-            if (!validation.valid) {
-                console.error('Error: Invalid scope(s):', validation.invalid.join(', '));
-                console.error('Available scopes:', getAvailableScopeNames().join(', '));
-                process.exit(1);
-            }
-        } else {
-            console.log('No --scopes flag specified, using defaults:', DEFAULT_SCOPES.join(', '));
-            console.log('Tip: Use --scopes=gmail.readonly for read-only access');
-            console.log('Available scopes:', getAvailableScopeNames().join(', '));
-        }
-
-        await authenticate(scopes);
-        console.log('Authentication completed successfully');
-        process.exit(0);
-    }
-
+/** Build the per-process Gmail runtime. Call after loadCredentials(). */
+export function createRuntime() {
     // Initialize Gmail API
     const gmail = createGmail({ version: 'v1', auth: oauth2Client });
     const account = createAccountContext({
@@ -311,7 +283,23 @@ async function main() {
         );
         return profile.data;
     });
+    return { gmail, account };
+}
 
+/** Load credentials then build the runtime - for entry points other than stdio. */
+export async function initRuntime() {
+    await loadCredentials();
+    return createRuntime();
+}
+
+/**
+ * Build a fresh server instance. The HTTP transport needs one Server per client
+ * session, so construction can no longer live inside main(). Handler bodies are
+ * UNCHANGED: `gmail`, `account` and `server` keep their names, now destructured
+ * from the runtime instead of closed over from main().
+ */
+export function createServer(runtime: ReturnType<typeof createRuntime>) {
+    const { gmail, account } = runtime;
     // Server implementation
     const server = new Server(
         {
@@ -1686,12 +1674,54 @@ async function main() {
             return renderToolError(error);
         }
     });
+    return server;
+}
 
+async function main() {
+    await loadCredentials();
+
+    if (process.argv[2] === 'auth') {
+        // Parse --scopes flag from CLI arguments
+        // Usage: node dist/index.js auth --scopes=<scope1,scope2,...>
+        // Example: node dist/index.js auth --scopes=gmail.readonly
+        // Example: node dist/index.js auth --scopes=gmail.readonly,gmail.settings.basic
+        const scopesArg = process.argv.find(arg => arg.startsWith('--scopes='));
+        let scopes = DEFAULT_SCOPES;
+
+        if (scopesArg) {
+            const scopesValue = scopesArg.slice('--scopes='.length);
+            scopes = parseScopes(scopesValue);
+            const validation = validateScopes(scopes);
+
+            if (!validation.valid) {
+                console.error('Error: Invalid scope(s):', validation.invalid.join(', '));
+                console.error('Available scopes:', getAvailableScopeNames().join(', '));
+                process.exit(1);
+            }
+        } else {
+            console.log('No --scopes flag specified, using defaults:', DEFAULT_SCOPES.join(', '));
+            console.log('Tip: Use --scopes=gmail.readonly for read-only access');
+            console.log('Available scopes:', getAvailableScopeNames().join(', '));
+        }
+
+        await authenticate(scopes);
+        console.log('Authentication completed successfully');
+        process.exit(0);
+    }
+
+    const server = createServer(createRuntime());
     const transport = new StdioServerTransport();
     await server.connect(transport);
 }
 
-main().catch((error) => {
-    console.error(error instanceof GmailStartupError ? error.message : 'GMAIL_STARTUP_FAILED: Unable to initialize the selected Gmail server.');
-    process.exit(1);
-});
+// Only auto-start stdio when this file IS the process entry point. src/http.ts
+// imports createServer() from here and must not also raise a stdio server.
+// realpath both sides: import.meta.url is already resolved, so a launch path
+// crossing a junction would otherwise fail this test silently and exit 0.
+const entryHref = process.argv[1] ? pathToFileURL(fsEntry.realpathSync(process.argv[1])).href : '';
+if (entryHref && import.meta.url === entryHref) {
+  main().catch((error) => {
+      console.error(error instanceof GmailStartupError ? error.message : 'GMAIL_STARTUP_FAILED: Unable to initialize the selected Gmail server.');
+      process.exit(1);
+  });
+}
