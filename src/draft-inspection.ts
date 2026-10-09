@@ -359,9 +359,13 @@ function decodeEncodedWords(value: string): string {
 }
 
 function normalizedAddressList(value: string): Array<{ address: string; name: string }> | undefined {
-  const parsed = emailAddresses.parseAddressList(normalizeHeaderValue(value));
-  return parsed?.flatMap(entry => entry.type === 'mailbox' ? [entry] : entry.addresses)
-    .map(entry => ({ address: entry.address.toLowerCase(), name: normalizeDisplayName(decodeEncodedWords(entry.name ?? '')) }));
+  try {
+    const parsed = emailAddresses.parseAddressList(normalizeHeaderValue(value));
+    return parsed?.flatMap(entry => entry.type === 'mailbox' ? [entry] : entry.addresses)
+      .map(entry => ({ address: entry.address.toLowerCase(), name: normalizeDisplayName(decodeEncodedWords(entry.name ?? '')) }));
+  } catch {
+    return undefined;
+  }
 }
 
 function headerComparisonReason(actual: string, expected: string): string {
@@ -468,20 +472,40 @@ export function canonicalizeTextForComparison(value: string): string {
   return canonicalizeLineEndings(value).split('\n').map(line => line.trimEnd()).join('\n').replace(/\n+$/, '');
 }
 
-function looseSignatureText(value: string): string {
-  return value.replace(/\[image:[^\]]*\]/gi, '')
-    .replace(/<https?:[^>]*>/gi, '')
-    .replace(/\s+/g, ' ').trim();
+const SIGNATURE_TEXT_TOKENS = /\[image:[^\]]*\]|<[a-z][a-z\d+.-]*:[^>]*>/gi;
+
+function normalizeSignatureToken(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function allowedSignatureTokens(signatureHtml: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const tag of signatureHtml.matchAll(/<[a-z][a-z\d:-]*\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi)) {
+    for (const attribute of tag[0].matchAll(/\s+([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
+      const name = attribute[1].toLowerCase();
+      const value = decodeHtmlEntities(attribute[2] ?? attribute[3] ?? attribute[4] ?? '').trim();
+      if (name === 'href' || name === 'src') tokens.add(normalizeSignatureToken(`<${value}>`));
+      if (name === 'alt') tokens.add(normalizeSignatureToken(`[image: ${value}]`));
+    }
+  }
+  return tokens;
+}
+
+function looseSignatureText(value: string, allowedTokens: Set<string>): string {
+  return normalizeSignatureToken(value.replace(SIGNATURE_TEXT_TOKENS,
+    token => allowedTokens.has(normalizeSignatureToken(token)) ? '' : token));
 }
 
 function removeTrailingTextSignature(text: string, signatureHtml: string | undefined, matches: number): string | undefined {
   if (!signatureHtml || matches !== 1) return undefined;
-  // Preserve visible line breaks and inline text when converting the resolved signature.
-  const signature = looseSignatureText(decodeHtmlEntities(signatureHtml
+  const visibleSignatureHtml = signatureHtml
     .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, '')
-    .replace(/<!--[^]*?-->/g, '')
+    .replace(/<!--[^]*?-->/g, '');
+  const allowedTokens = allowedSignatureTokens(visibleSignatureHtml);
+  // Preserve visible line breaks and inline text when converting the resolved signature.
+  const signature = looseSignatureText(decodeHtmlEntities(visibleSignatureHtml
     .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/table|\/h[1-6])\b[^>]*>/gi, '\n')
-    .replace(/<[^>]*>/g, '')));
+    .replace(/<[^>]*>/g, '')), allowedTokens);
   if (!signature) return undefined;
   const actual = canonicalizeTextForComparison(text);
   // Try terminal blocks from the last paragraph boundary back toward the body.
@@ -489,7 +513,10 @@ function removeTrailingTextSignature(text: string, signatureHtml: string | undef
   const separators = [...actual.matchAll(/\n\n|^--\n/gm)];
   for (const separator of separators.reverse()) {
     const start = separator.index!;
-    if (looseSignatureText(actual.slice(start + separator[0].length)) !== signature) continue;
+    const tail = actual.slice(start + separator[0].length);
+    // Even a token also present as visible signature text must come from its attributes.
+    if ([...tail.matchAll(SIGNATURE_TEXT_TOKENS)].some(token => !allowedTokens.has(normalizeSignatureToken(token[0])))) continue;
+    if (looseSignatureText(tail, allowedTokens) !== signature) continue;
     const beforeSignature = canonicalizeTextForComparison(actual.slice(0, start));
     return canonicalizeTextForComparison(beforeSignature.replace(/(?:^|\n)--$/, ''));
   }

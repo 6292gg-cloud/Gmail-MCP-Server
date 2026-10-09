@@ -359,6 +359,14 @@ describe('draft payload inspection', () => {
     expect(compareAddressHeader(actual, expected).match).toBe(match);
   });
 
+  it('returns NOT_READY without throwing for a From header with 5000 nested parentheses', () => {
+    const draft = fixture();
+    draft.message!.payload!.headers![0].value = `${'('.repeat(5000)}Sender${')'.repeat(5000)} <sender@example.com>`;
+    const result = inspectDraftPayload(draft, { expectedHeaders: { from: 'sender@example.com' } });
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.comparison.from).toBe('mismatch');
+  });
+
   it('canonicalizes text without losing indentation or internal blank lines', () => {
     expect(canonicalizeTextForComparison('\n  One \t\r\n\r\n\r\n Two\t\r\n \r\n')).toBe('\n  One\n\n\n Two');
   });
@@ -450,6 +458,46 @@ describe('draft payload inspection', () => {
     expect(result.verdict).toBe('READY');
     expect(result.comparison.body).toBe('text-signature-stripped');
     expect(result.body.textParagraphs).toBe(2);
+  });
+
+  it.each(['<https://wrong-payment.example/redirect>', '[image: unexpected logo]'])(
+    'rejects an unexpected signature-tail token %s even with exact expected HTML', token => {
+      const signatureHtml = '<div>Signature <a href="https://trevi-elite.com">Website</a><img alt="logo" src="cid:x"></div>';
+      const result = inspectDraftPayload(
+        fixture({ text: `Hello\n\nSignature Website <https://trevi-elite.com> [image: logo] ${token}`, html: `<p>Hello</p>${signatureHtml}` }),
+        { expectedBody: 'Hello', expectedHtmlBody: '<p>Hello</p>', requireSignature: true, checkRemoteSignatureAssets: false },
+        signatureHtml,
+      );
+      expect(result.signature.matches).toBe(1);
+      expect(result.verdict).toBe('NOT_READY');
+      expect(result.comparison.body).toBe('mismatch');
+    },
+  );
+
+  it('strips only the resolved signature own link, source URL and image alt tokens', () => {
+    const signatureHtml = '<div>Signature <a href="https://trevi-elite.com/?a=1&amp;b=2">Website</a>'
+      + '<img alt="Trevi &amp; Co" src="https://trevi-elite.com/logo.png"></div>';
+    const result = inspectDraftPayload(
+      fixture({
+        text: 'Hello\n\nSignature Website <https://trevi-elite.com/?a=1&b=2> [image: Trevi & Co] <https://trevi-elite.com/logo.png>',
+        html: `<p>Hello</p>${signatureHtml}`,
+      }),
+      { expectedBody: 'Hello', expectedHtmlBody: '<p>Hello</p>', requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.body).toBe('text-signature-stripped');
+  });
+
+  it('rejects a tail URL present only as visible signature text rather than an href or src', () => {
+    const signatureHtml = '<div>Signature &lt;https://wrong-payment.example/redirect&gt;</div>';
+    const result = inspectDraftPayload(
+      fixture({ text: 'Hello\n\nSignature <https://wrong-payment.example/redirect>', html: `<p>Hello</p>${signatureHtml}` }),
+      { expectedBody: 'Hello', expectedHtmlBody: '<p>Hello</p>', requireSignature: true },
+      signatureHtml,
+    );
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.comparison.body).toBe('mismatch');
   });
 
   it.each([
