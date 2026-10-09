@@ -4,7 +4,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 // Schema definitions
 export const GetAccountContextSchema = z.object({}).strict();
 
-const IncludeSignatureSchema = z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature (users.settings.sendAs.get) and append its HTML to the body. The draft becomes HTML (multipart/alternative). Use for client-facing drafts — Gmail web compose does NOT auto-insert the signature into API-created drafts, so this is the only way to get the signature (incl. images hosted on public CDN URLs) into the draft. Default false to avoid surprising automated/internal drafts.");
+const IncludeSignatureSchema = z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature and append its HTML to the MIME body. This checks only the draft/API message, not later Gmail Web or extension behavior at send time. For gabriele.g@trevielite.it drafts that the operator sends in Gmail Web, use false: pre-signed API drafts produced duplicate WiseStamp signatures in Sent on 2026-10-09. Inspect the final Sent message after manual send. Default false.");
 
 export const SendEmailSchema = z.object({
   to: z.array(z.string()).describe("List of recipient email addresses"),

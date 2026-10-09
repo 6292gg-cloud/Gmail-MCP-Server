@@ -433,7 +433,7 @@ Creates a draft email without sending it. **Also supports attachments**.
 
 #### Signature behaviour (`includeSignature`)
 
-Gmail's web composer auto-inserts your send-as signature **only when you compose in the browser**. When a draft is created through the API and you later open it in web-compose to review/send, Gmail does **not** inject the signature — so API-created drafts arrive with no signature and no signature images. This is a Gmail-side behaviour, not a bug in this server.
+An API-created draft opened in Gmail Web does not necessarily show a Gmail-added signature. That draft view does not establish what a later manual send will contain. On 2026-10-09, two Trevi `gabriele.g@trevielite.it` drafts created with `includeSignature: true` were manually sent and the Sent MIME contained two WiseStamp signatures in both plain text and HTML. The account's Gmail Web settings select `WS-2026` for new mail and replies. For this account's manual Gmail Web send path, use `includeSignature: false`, inspect the stored draft as unsigned, and inspect the final Sent message after the operator sends. The exact downstream insertion point has not been isolated.
 
 Set `includeSignature: true` (default `false`) on either `draft_email` or `update_draft` and the server will:
 
