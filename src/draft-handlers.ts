@@ -127,6 +127,7 @@ function renderInspectionError(message: string) {
     verdict: 'NOT_READY',
     errors: [message],
     warnings: [],
+    comparison: { from: 'not-checked', body: 'not-checked' },
     headers: { from: '', to: '', cc: '', bcc: '', subject: '', threadId: '' },
     body: { hasText: false, hasHtml: false, preview: '', textParagraphs: 0, htmlBlocks: 0 },
     signature: { required: true, matches: 0, images: 0, assets: [] },

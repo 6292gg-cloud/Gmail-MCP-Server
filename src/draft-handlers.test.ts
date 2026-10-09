@@ -93,9 +93,33 @@ describe('handleInspectDraft', () => {
     });
 
     expect(inspection(result).verdict).toBe('READY');
+    expect(inspection(result).comparison).toEqual({ from: 'not-checked', body: 'not-checked' });
     expect(result).not.toHaveProperty('isError');
     expect(fixture.get).toHaveBeenCalledWith({ userId: 'me', id: 'r-1', format: 'full' });
     expect(fixture.update).not.toHaveBeenCalled();
+  });
+
+  it('returns normalized comparisons using the handler-resolved Gmail signature', async () => {
+    const signature = '<div>Gabriele Grimaldi<br>Trevi Elite</div>';
+    const fixture = fakeGmail({
+      signature,
+      draft: draftFixture({
+        text: 'Hello\n\n-- \nGabriele Grimaldi\nTrevi Elite',
+        html: `<p>Hello</p>${signature}`,
+      }),
+    });
+    const result = await handleInspectDraft(fixture.gmail, {
+      draftId: 'r-1',
+      expectedHeaders: { from: 'sender@example.com' },
+      expectedBody: 'Hello',
+      expectedHtmlBody: '<p>Hello</p>',
+      requireSignature: true,
+      checkRemoteSignatureAssets: false,
+    });
+    expect(inspection(result)).toMatchObject({
+      verdict: 'READY', errors: [],
+      comparison: { from: 'address-normalized', body: 'text-signature-stripped' },
+    });
   });
 
   it('returns ordinary acceptance failures as NOT_READY without MCP error semantics', async () => {
@@ -125,9 +149,9 @@ describe('handleInspectDraft', () => {
 
     expect(parsed.verdict).toBe('NOT_READY');
     expect(parsed.errors).toEqual(expect.arrayContaining([
-      'Draft To header does not match expected value',
-      'Draft Subject header does not match expected value',
-      'Draft plain-text body does not match expected content',
+      'Draft To header does not match expected value (stored "recipient@example.com", expected "wrong@example.com")',
+      'Draft Subject header does not match expected value (stored "Inspection", expected "Wrong subject")',
+      'Draft plain-text body does not match expected content (line 1: stored "Hello", expected "Wrong text")',
       'Draft HTML body does not match expected content',
     ]));
     expect(result).not.toHaveProperty('isError');
@@ -139,6 +163,7 @@ describe('handleInspectDraft', () => {
     const result = await handleInspectDraft(fixture.gmail, { draftId: 'r-1', requireSignature: true });
 
     expect(inspection(result)).toMatchObject({ verdict: 'NOT_READY', errors: ['Draft has no From header'] });
+    expect(inspection(result).comparison).toEqual({ from: 'not-checked', body: 'not-checked' });
     expect(result).not.toHaveProperty('isError');
     expect(fixture.list).not.toHaveBeenCalled();
   });

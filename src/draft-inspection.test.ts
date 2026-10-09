@@ -6,6 +6,8 @@ import type { gmail_v1 } from 'googleapis';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getToolByName, InspectDraftSchema } from './tools.js';
 import {
+  canonicalizeTextForComparison,
+  compareAddressHeader,
   inspectDraft,
   inspectDraftPayload,
   probeRemoteAsset,
@@ -226,6 +228,253 @@ afterAll(async () => {
 });
 
 describe('draft payload inspection', () => {
+  it('From header: bare expected address matches a display-name stored header', () => {
+    const draft = fixture();
+    draft.message!.payload!.headers![0].value = 'Gabriele Grimaldi <gabriele.g@trevielite.it>';
+    const result = inspectDraftPayload(draft, { expectedHeaders: { from: 'gabriele.g@trevielite.it' } });
+
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.from).toBe('address-normalized');
+  });
+
+  it('From header: expected display name must match when given', () => {
+    const draft = fixture();
+    draft.message!.payload!.headers![0].value = 'Gabriele Grimaldi <gabriele.g@trevielite.it>';
+    const result = inspectDraftPayload(draft, {
+      expectedHeaders: { from: 'Someone Else <gabriele.g@trevielite.it>' },
+    });
+
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain('Draft From header does not match expected value (stored "Gabriele Grimaldi <gabriele.g@trevielite.it>", expected "Someone Else <gabriele.g@trevielite.it>")');
+  });
+
+  it('From header: address case is ignored', () => {
+    const draft = fixture();
+    draft.message!.payload!.headers![0].value = 'Gabriele Grimaldi <Gabriele.G@TreviElite.it>';
+    const result = inspectDraftPayload(draft, { expectedHeaders: { from: 'gabriele.g@trevielite.it' } });
+
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.from).toBe('address-normalized');
+  });
+
+  it.each([
+    ['Sender <sender@example.com>', 'Other <sender@example.com>'],
+    ['Sender <sender@example.com>', 'other@example.com'],
+    ['not an address', 'another invalid address'],
+  ])('reports a From mismatch for %s versus %s', (actual, expected) => {
+    const draft = fixture();
+    draft.message!.payload!.headers![0].value = actual;
+    const result = inspectDraftPayload(draft, { expectedHeaders: { from: expected } });
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.comparison.from).toBe('mismatch');
+  });
+
+  it.each([
+    ['=?UTF-8?B?0JrRgdC10L3QuNGP?=', 'Ксения'],
+    ['=?UTF-8?Q?Gabriele_Grimaldi?=', 'Gabriele Grimaldi'],
+    ['=?UTF-8?Q?=D0=9A=D1=81?= =?UTF-8?B?0LXQvdC40Y8=?=', 'Ксения'],
+    ['=?iso-8859-1?Q?Andr=E9?=', 'André'],
+    ['=?windows-1252?B?gA==?=', '€'],
+    ['=?koi8-r?Q?=F1?=', 'Я'],
+    ['=?windows-1251?B?3w==?=', 'Я'],
+    ['=?unknown-charset?Q?=D0=AF?=', 'Я'],
+  ])('decodes RFC 2047 display name %s', (actualName, expectedName) => {
+    const draft = fixture();
+    draft.message!.payload!.headers![0].value = `${actualName} <k@trevielite.it>`;
+    const result = inspectDraftPayload(draft, {
+      expectedHeaders: { from: `${expectedName} <k@trevielite.it>` },
+    });
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.from).toBe('address-normalized');
+    expect(compareAddressHeader(`${actualName} <k@trevielite.it>`, 'k@trevielite.it').match).toBe(true);
+    expect(compareAddressHeader(`${expectedName} <k@trevielite.it>`, `${actualName} <k@trevielite.it>`).match).toBe(true);
+  });
+
+  it('To header: list compared positionally, names optional', () => {
+    const draft = fixture();
+    draft.message!.payload!.headers![1].value = 'First Person <first@example.com>, Second Person <second@example.com>';
+    const result = inspectDraftPayload(draft, {
+      expectedHeaders: { to: ['first@example.com', 'Second Person <SECOND@example.com>'] },
+    });
+
+    expect(result.verdict).toBe('READY');
+    const reversed = inspectDraftPayload(draft, {
+      expectedHeaders: { to: ['second@example.com', 'first@example.com'] },
+    });
+    expect(reversed.verdict).toBe('NOT_READY');
+    expect(reversed.errors[0]).toContain('Draft To header does not match expected value (stored ');
+  });
+
+  it('Plain-text body: trailing newline difference is not a mismatch', () => {
+    const result = inspectDraftPayload(fixture({ text: 'One\n\nTwo\n' }), { expectedBody: 'One\n\nTwo' });
+
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.body).toBe('exact');
+  });
+
+  it('Plain-text body: trailing spaces on lines are ignored', () => {
+    const result = inspectDraftPayload(
+      fixture({ text: 'One  \r\n \t\r\nTwo\t \r\n  \r\n' }),
+      { expectedBody: 'One\n\nTwo  ' },
+    );
+
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.body).toBe('exact');
+  });
+
+  it('Plain-text body: a stored Gmail signature in the text part is stripped before comparison', () => {
+    const signatureHtml = '<div>Gabriele Grimaldi<br>Trevi Elite</div>';
+    const result = inspectDraftPayload(
+      fixture({ text: 'One\n\nTwo\n\n-- \nGabriele Grimaldi\nTrevi Elite', html: `<p>One</p><p>Two</p>${signatureHtml}` }),
+      { expectedBody: 'One\n\nTwo', requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.body).toBe('text-signature-stripped');
+  });
+
+  it('Plain-text body: a real word difference is still NOT_READY and the message names the first differing line', () => {
+    const result = inspectDraftPayload(
+      fixture({ text: 'One\n\nStored words' }),
+      { expectedBody: 'One\n\nExpected words' },
+    );
+
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain('Draft plain-text body does not match expected content (line 3: stored "Stored words", expected "Expected words")');
+    expect(result.comparison.body).toBe('mismatch');
+  });
+
+  it.each([
+    ['" Gabriele   Grimaldi " <Gabriele.G@TreviElite.it>', 'Gabriele Grimaldi <gabriele.g@trevielite.it>', true],
+    ['gabriele.g@trevielite.it', 'Gabriele Grimaldi <gabriele.g@trevielite.it>', false],
+    ['A <a@example.com>, b@example.com', 'a@example.com', false],
+    ['a@example.com', 'b@example.com', false],
+    ['  not an address\r\n ', 'not an address', true],
+    ['not an address', 'NOT AN ADDRESS', false],
+    ['a@example.com', 'invalid', false],
+    ['', '  ', true],
+    ['Team: a@example.com, b@example.com;', 'a@example.com, b@example.com', true],
+  ])('compares address headers %s against %s', (actual, expected, match) => {
+    expect(compareAddressHeader(actual, expected).match).toBe(match);
+  });
+
+  it('canonicalizes text without losing indentation or internal blank lines', () => {
+    expect(canonicalizeTextForComparison('\n  One \t\r\n\r\n\r\n Two\t\r\n \r\n')).toBe('\n  One\n\n\n Two');
+  });
+
+  it('normalizes Cc and Bcc addresses and trims only outer Subject whitespace', () => {
+    const draft = fixture();
+    draft.message!.payload!.headers![2].value = 'Copy Person <COPY@example.com>';
+    draft.message!.payload!.headers![3].value = 'Hidden Person <HIDDEN@example.com>';
+    const result = inspectDraftPayload(draft, {
+      expectedHeaders: { cc: ['copy@example.com'], bcc: ['hidden@example.com'], subject: ' Inspection\r\n ' },
+    });
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison).toEqual({ from: 'not-checked', body: 'not-checked' });
+    expect(inspectDraftPayload(draft, { expectedHeaders: { subject: 'inspection' } }).verdict).toBe('NOT_READY');
+  });
+
+  it('reports exact and unchecked comparisons, including HTML-only comparisons', () => {
+    expect(inspectDraftPayload(fixture(), {}).comparison).toEqual({ from: 'not-checked', body: 'not-checked' });
+    expect(inspectDraftPayload(fixture(), {
+      expectedHeaders: { from: 'Sender <sender@example.com>' }, expectedHtmlBody: '<p>One</p><p>Two</p>',
+    }).comparison).toEqual({ from: 'exact', body: 'exact' });
+    expect(inspectDraftPayload(fixture(), { expectedHtmlBody: '<p>Wrong</p>' }).comparison.body).toBe('mismatch');
+  });
+
+  it.each(['  One\n\nTwo', 'One\nTwo', 'One\n\n\nTwo'])('preserves meaningful text structure in %j', text => {
+    const result = inspectDraftPayload(fixture({ text, html: '' }), { expectedBody: 'One\n\nTwo' });
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.comparison.body).toBe('mismatch');
+  });
+
+  it('decodes signature entities and strips a verified trailing signature after a blank line', () => {
+    const signatureHtml = '<div>Gabriele &amp; Co<br>Trevi &#69;lite</div>';
+    const result = inspectDraftPayload(
+      fixture({ text: 'Hello\n\nGabriele & Co\nTrevi Elite', html: `<p>Hello</p>${signatureHtml}` }),
+      { expectedBody: 'Hello', requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.body).toBe('text-signature-stripped');
+  });
+
+  it('does not strip a signature-like body line without a separator', () => {
+    const signatureHtml = '<div>Gabriele</div>';
+    const result = inspectDraftPayload(
+      fixture({ text: 'Thanks,\nGabriele', html: `<p>Thanks,</p>${signatureHtml}` }),
+      { expectedBody: 'Thanks,', requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+    expect(result.signature.matches).toBe(1);
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.comparison.body).toBe('mismatch');
+  });
+
+  it.each(['\n\n', '\n-- \n'])('strips a verified signature after separator %j', separator => {
+    const signatureHtml = '<div>Gabriele</div>';
+    const result = inspectDraftPayload(
+      fixture({ text: `Thanks,${separator}Gabriele`, html: `<p>Thanks,</p>${signatureHtml}` }),
+      { expectedBody: 'Thanks,', requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.body).toBe('text-signature-stripped');
+  });
+
+  it.each([0, 2])('does not strip the text signature when HTML has %i signature matches', count => {
+    const signatureHtml = '<div>Gabriele</div>';
+    const result = inspectDraftPayload(
+      fixture({ text: 'Thanks,\n\nGabriele', html: `<p>Thanks,</p>${signatureHtml.repeat(count)}` }),
+      { expectedBody: 'Thanks,', requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+    expect(result.signature.matches).toBe(count);
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.comparison.body).toBe('mismatch');
+  });
+
+  it('strips a verified multi-paragraph Gmail signature with link and image tokens', () => {
+    const signatureHtml = '<div><b>Gabriele Grimaldi</b><br>Trevi Elite S.r.l.</div>'
+      + '<div><a href="https://trevi-elite.com">trevi-elite.com</a> · <img alt="logo" src="cid:x"></div>';
+    const result = inspectDraftPayload(
+      fixture({
+        text: 'One\n\nTwo\n\nGabriele Grimaldi\nTrevi Elite S.r.l.\n\ntrevi-elite.com <https://trevi-elite.com> · [image: logo]',
+        html: `<p>One</p><p>Two</p>${signatureHtml}`,
+      }),
+      { expectedBody: 'One\n\nTwo', requireSignature: true, checkRemoteSignatureAssets: false },
+      signatureHtml,
+    );
+    expect(result.signature.matches).toBe(1);
+    expect(result.verdict).toBe('READY');
+    expect(result.comparison.body).toBe('text-signature-stripped');
+    expect(result.body.textParagraphs).toBe(2);
+  });
+
+  it.each([
+    ['Hello\n\n-- \nSignature\nUnexpected tail', '<div>Signature</div>'],
+    ['Hello Signature', '<div>Signature</div>'],
+    ['Hello\n\n-- \nSignature', undefined],
+    ['Hello\n\n-- \nDifferent signature', '<div>Signature</div>'],
+    ['Hello\n\n-- \nSignature', '<div></div>'],
+  ])('does not strip unverified or non-terminal signature content from %j', (text, signatureHtml) => {
+    const result = inspectDraftPayload(fixture({ text, html: '' }), { expectedBody: 'Hello' }, signatureHtml);
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.comparison.body).toBe('mismatch');
+  });
+
+  it('does not hide an HTML mismatch after the text signature matches', () => {
+    const result = inspectDraftPayload(
+      fixture({ text: 'Hello\n\nSignature', html: '<p>Wrong</p><p>Signature</p>' }),
+      { expectedBody: 'Hello', expectedHtmlBody: '<p>Hello</p>', requireSignature: true },
+      '<p>Signature</p>',
+    );
+    expect(result.verdict).toBe('NOT_READY');
+    expect(result.errors).toContain('Draft HTML body does not match expected content');
+    expect(result.comparison.body).toBe('mismatch');
+  });
+
   it('identifies the current message behind a draft so a full edit can recover its payload', () => {
     const draft = fixture({ attachments: ['keep.pdf'] });
     const first = inspectDraftPayload(draft, {});
@@ -295,7 +544,7 @@ describe('draft payload inspection', () => {
     expect(standalone.warnings).not.toContain('Gmail Web may hide this reply signature under Show trimmed content; reveal it and do not use Insert signature');
   });
 
-  it('rejects wrong recipients and subject without echoing private header values', () => {
+  it('rejects wrong recipients and subject with stored and expected header values', () => {
     const actualRecipient = 'actual-private@example.com';
     const expectedRecipient = 'expected-private@example.com';
     const draft = fixture();
@@ -313,18 +562,13 @@ describe('draft payload inspection', () => {
     });
 
     expect(result.verdict).toBe('NOT_READY');
-    expect(result.errors).toContain('Draft To header does not match expected value');
-    expect(result.errors).toContain('Draft Subject header does not match expected value');
-    const diagnostics = result.errors.join(' ');
-    expect(diagnostics).not.toContain(actualRecipient);
-    expect(diagnostics).not.toContain(expectedRecipient);
-    expect(diagnostics).not.toContain('private subject');
-    expect(Math.max(...result.errors.map(error => error.length))).toBeLessThan(100);
+    expect(result.errors).toContain(`Draft To header does not match expected value (stored "${actualRecipient}", expected "${expectedRecipient}")`);
+    expect(result.errors).toContain('Draft Subject header does not match expected value (stored "Actual private subject", expected "Expected private subject")');
   });
 
   it('rejects wrong plain and HTML bodies without leaking complete content', () => {
-    const actualText = 'actual-private-body';
-    const expectedText = 'expected-private-body';
+    const actualText = 'actual-private-body'.repeat(10);
+    const expectedText = 'expected-private-body'.repeat(10);
     const actualHtml = '<p>actual-private-html</p>';
     const expectedHtml = '<p>expected-private-html</p>';
 
@@ -334,7 +578,7 @@ describe('draft payload inspection', () => {
     );
 
     expect(result.verdict).toBe('NOT_READY');
-    expect(result.errors).toContain('Draft plain-text body does not match expected content');
+    expect(result.errors).toContain(`Draft plain-text body does not match expected content (line 1: stored "${actualText.slice(0, 60)}", expected "${expectedText.slice(0, 60)}")`);
     expect(result.errors).toContain('Draft HTML body does not match expected content');
     const diagnostics = result.errors.join(' ');
     expect(diagnostics).not.toContain(actualText);
@@ -503,8 +747,7 @@ describe('draft payload inspection', () => {
     });
 
     expect(result.verdict).toBe('NOT_READY');
-    expect(result.errors).toContain(`Draft ${_label} header does not match expected value`);
-    expect(result.errors.join(' ')).not.toContain(actual);
+    expect(result.errors).toContain(`Draft ${_label} header does not match expected value (stored "${actual}", expected "${Array.isArray(expected) ? expected.join(', ') : expected}")`);
   });
 
   it('does not let a reserialized signature table hide a collapsed message body', () => {

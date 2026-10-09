@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import http, { type IncomingMessage, type RequestOptions } from 'node:http';
 import https from 'node:https';
 import { isIP } from 'node:net';
+import emailAddresses from 'email-addresses';
 import type { gmail_v1 } from 'googleapis';
 import { containsSignature, fingerprintSignature, type SignatureFingerprint } from './signature.js';
 
@@ -35,6 +36,10 @@ export interface DraftInspection {
   verdict: 'READY' | 'NOT_READY';
   errors: string[];
   warnings: string[];
+  comparison: {
+    from: 'exact' | 'address-normalized' | 'mismatch' | 'not-checked';
+    body: 'exact' | 'text-signature-stripped' | 'mismatch' | 'not-checked';
+  };
   headers: { from: string; to: string; cc: string; bcc: string; subject: string; threadId: string };
   body: { hasText: boolean; hasHtml: boolean; preview: string; textParagraphs: number; htmlBlocks: number };
   signature: { required: boolean; matches: number; images: number; assets: RemoteAssetResult[] };
@@ -113,7 +118,8 @@ export function inspectDraftPayload(
     ? `${removeAppliedSignatureSeparator(htmlBeforeSignature)}${rawHtml.slice(signatureRegion.end)}`
     : rawHtml;
   const messageHtml = comparableHtml.trim();
-  const textParagraphs = countTextParagraphs(text);
+  const textWithoutSignature = removeTrailingTextSignature(rawText, signatureHtml, matches);
+  const textParagraphs = countTextParagraphs(textWithoutSignature ?? text);
   const htmlBlocks = countHtmlBlocks(messageHtml);
   const draftSignatureHtml = signatureRegion?.html ?? '';
   const imageUrls = extractImageUrls(draftSignatureHtml);
@@ -154,13 +160,14 @@ export function inspectDraftPayload(
   if (required && matches === 1 && headerValue(headers, 'in-reply-to')) {
     warnings.push('Gmail Web may hide this reply signature under Show trimmed content; reveal it and do not use Insert signature');
   }
-  validateExpectedHeaders(headers, options.expectedHeaders, errors);
-  validateExpectedBody(rawText, comparableHtml, options, errors);
+  const fromComparison = validateExpectedHeaders(headers, options.expectedHeaders, errors);
+  const bodyComparison = validateExpectedBody(rawText, comparableHtml, options, errors, textWithoutSignature);
   const result: DraftInspection = {
     messageId: draft.message?.id ?? '',
     verdict: errors.length ? 'NOT_READY' : 'READY',
     errors,
     warnings,
+    comparison: { from: fromComparison, body: bodyComparison },
     headers: {
       from: headerValue(headers, 'from'),
       to: headerValue(headers, 'to'),
@@ -324,12 +331,71 @@ function headerValue(headers: gmail_v1.Schema$MessagePartHeader[], name: string)
   return headers.find(header => header.name?.toLowerCase() === name)?.value ?? '';
 }
 
+function normalizeHeaderValue(value: string): string {
+  return canonicalizeLineEndings(value).trim();
+}
+
+function normalizeDisplayName(value: string): string {
+  return value.trim().replace(/^"([\s\S]*)"$/, '$1').trim().replace(/\s+/g, ' ');
+}
+
+function decodeEncodedWords(value: string): string {
+  // RFC 2047 ignores folding whitespace between adjacent encoded words.
+  return value
+    .replace(/(=\?[^?\s]+\?[bq]\?[^?]*\?=)[\t\r\n ]+(?==\?[^?\s]+\?[bq]\?[^?]*\?=)/gi, '$1')
+    .replace(/=\?([^?\s]+)\?([bq])\?([^?]*)\?=/gi, (_word, charset: string, encoding: string, payload: string) => {
+      const bytes = encoding.toLowerCase() === 'b'
+        ? Buffer.from(payload, 'base64')
+        : Buffer.from(payload.replace(/_/g, ' ').replace(/=([\da-f]{2})/gi,
+          (_escape, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
+      let decoder: TextDecoder;
+      try {
+        decoder = new TextDecoder(charset);
+      } catch {
+        decoder = new TextDecoder('utf-8');
+      }
+      return decoder.decode(bytes);
+    });
+}
+
+function normalizedAddressList(value: string): Array<{ address: string; name: string }> | undefined {
+  const parsed = emailAddresses.parseAddressList(normalizeHeaderValue(value));
+  return parsed?.flatMap(entry => entry.type === 'mailbox' ? [entry] : entry.addresses)
+    .map(entry => ({ address: entry.address.toLowerCase(), name: normalizeDisplayName(decodeEncodedWords(entry.name ?? '')) }));
+}
+
+function headerComparisonReason(actual: string, expected: string): string {
+  return `stored ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`;
+}
+
+export function compareAddressHeader(actual: string, expected: string): { match: boolean; reason?: string } {
+  const actualAddresses = normalizedAddressList(actual);
+  const expectedAddresses = normalizedAddressList(expected);
+  if (!actualAddresses || !expectedAddresses) {
+    const stored = normalizeHeaderValue(actual);
+    const wanted = normalizeHeaderValue(expected);
+    return stored === wanted ? { match: true } : { match: false, reason: headerComparisonReason(stored, wanted) };
+  }
+
+  const match = actualAddresses.length === expectedAddresses.length
+    && expectedAddresses.every((expectedAddress, index) => {
+      const actualAddress = actualAddresses[index];
+      return actualAddress.address === expectedAddress.address
+        && (!expectedAddress.name || actualAddress.name === expectedAddress.name);
+    });
+  if (match) return { match: true };
+  const format = (addresses: typeof actualAddresses) => addresses
+    .map(entry => entry.name ? `${entry.name} <${entry.address}>` : entry.address).join(', ');
+  return { match: false, reason: headerComparisonReason(format(actualAddresses), format(expectedAddresses)) };
+}
+
 function validateExpectedHeaders(
   headers: gmail_v1.Schema$MessagePartHeader[],
   expected: ExpectedDraftHeaders | undefined,
   errors: string[],
-): void {
-  if (!expected) return;
+): DraftInspection['comparison']['from'] {
+  let fromComparison: DraftInspection['comparison']['from'] = 'not-checked';
+  if (!expected) return fromComparison;
   const fields: Array<[keyof ExpectedDraftHeaders, string]> = [
     ['from', 'From'],
     ['to', 'To'],
@@ -341,12 +407,20 @@ function validateExpectedHeaders(
   for (const [field, label] of fields) {
     const expectedField = expected[field];
     if (expectedField === undefined) continue;
-    const expectedValue = Array.isArray(expectedField) ? expectedField.join(', ') : expectedField;
-    const actualValue = headerValue(headers, field);
-    if (canonicalizeLineEndings(actualValue) !== canonicalizeLineEndings(expectedValue)) {
-      errors.push(`Draft ${label} header does not match expected value`);
+    const expectedValue = normalizeHeaderValue(Array.isArray(expectedField) ? expectedField.join(', ') : expectedField);
+    const actualValue = normalizeHeaderValue(headerValue(headers, field));
+    const exact = actualValue === expectedValue;
+    const comparison = field === 'subject'
+      ? { match: exact, reason: headerComparisonReason(actualValue, expectedValue) }
+      : compareAddressHeader(actualValue, expectedValue);
+    if (field === 'from') {
+      fromComparison = !comparison.match ? 'mismatch' : exact ? 'exact' : 'address-normalized';
+    }
+    if (!comparison.match) {
+      errors.push(`Draft ${label} header does not match expected value (${comparison.reason})`);
     }
   }
+  return fromComparison;
 }
 
 function validateExpectedBody(
@@ -354,23 +428,72 @@ function validateExpectedBody(
   html: string,
   options: InspectDraftOptions,
   errors: string[],
-): void {
-  if (
-    options.expectedBody !== undefined
-    && canonicalizeLineEndings(text) !== canonicalizeLineEndings(options.expectedBody)
-  ) {
-    errors.push('Draft plain-text body does not match expected content');
+  textWithoutSignature?: string,
+): DraftInspection['comparison']['body'] {
+  let comparison: DraftInspection['comparison']['body'] = 'not-checked';
+  if (options.expectedBody !== undefined) {
+    const actual = canonicalizeTextForComparison(text);
+    const expected = canonicalizeTextForComparison(options.expectedBody);
+    if (actual === expected) {
+      comparison = 'exact';
+    } else if (textWithoutSignature !== undefined && textWithoutSignature === expected) {
+      comparison = 'text-signature-stripped';
+    } else {
+      comparison = 'mismatch';
+      const actualLines = actual.split('\n');
+      const expectedLines = expected.split('\n');
+      let line = 0;
+      while (actualLines[line] === expectedLines[line]) line += 1;
+      const storedExcerpt = JSON.stringify((actualLines[line] ?? '').slice(0, 60));
+      const expectedExcerpt = JSON.stringify((expectedLines[line] ?? '').slice(0, 60));
+      errors.push(`Draft plain-text body does not match expected content (line ${line + 1}: stored ${storedExcerpt}, expected ${expectedExcerpt})`);
+    }
   }
-  if (
-    options.expectedHtmlBody !== undefined
-    && canonicalizeHtmlForComparison(html) !== canonicalizeHtmlForComparison(options.expectedHtmlBody)
-  ) {
-    errors.push('Draft HTML body does not match expected content');
+  if (options.expectedHtmlBody !== undefined) {
+    if (canonicalizeHtmlForComparison(html) !== canonicalizeHtmlForComparison(options.expectedHtmlBody)) {
+      errors.push('Draft HTML body does not match expected content');
+      comparison = 'mismatch';
+    } else if (comparison === 'not-checked') {
+      comparison = 'exact';
+    }
   }
+  return comparison;
 }
 
 function canonicalizeLineEndings(value: string): string {
   return value.replace(/\r\n?/g, '\n');
+}
+
+export function canonicalizeTextForComparison(value: string): string {
+  return canonicalizeLineEndings(value).split('\n').map(line => line.trimEnd()).join('\n').replace(/\n+$/, '');
+}
+
+function looseSignatureText(value: string): string {
+  return value.replace(/\[image:[^\]]*\]/gi, '')
+    .replace(/<https?:[^>]*>/gi, '')
+    .replace(/\s+/g, ' ').trim();
+}
+
+function removeTrailingTextSignature(text: string, signatureHtml: string | undefined, matches: number): string | undefined {
+  if (!signatureHtml || matches !== 1) return undefined;
+  // Preserve visible line breaks and inline text when converting the resolved signature.
+  const signature = looseSignatureText(decodeHtmlEntities(signatureHtml
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, '')
+    .replace(/<!--[^]*?-->/g, '')
+    .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/table|\/h[1-6])\b[^>]*>/gi, '\n')
+    .replace(/<[^>]*>/g, '')));
+  if (!signature) return undefined;
+  const actual = canonicalizeTextForComparison(text);
+  // Try terminal blocks from the last paragraph boundary back toward the body.
+  // A single newline is not a separator: it may be part of the message itself.
+  const separators = [...actual.matchAll(/\n\n|^--\n/gm)];
+  for (const separator of separators.reverse()) {
+    const start = separator.index!;
+    if (looseSignatureText(actual.slice(start + separator[0].length)) !== signature) continue;
+    const beforeSignature = canonicalizeTextForComparison(actual.slice(0, start));
+    return canonicalizeTextForComparison(beforeSignature.replace(/(?:^|\n)--$/, ''));
+  }
+  return undefined;
 }
 
 function canonicalizeHtmlForComparison(value: string): string {
