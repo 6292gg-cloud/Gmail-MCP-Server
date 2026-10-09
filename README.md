@@ -433,7 +433,7 @@ Creates a draft email without sending it. **Also supports attachments**.
 
 #### Signature behaviour (`includeSignature`)
 
-An API-created draft opened in Gmail Web does not necessarily show a Gmail-added signature. That draft view does not establish what a later manual send will contain. On 2026-10-09, two Trevi `gabriele.g@trevielite.it` drafts created with `includeSignature: true` were manually sent and the Sent MIME contained two WiseStamp signatures in both plain text and HTML. The account's Gmail Web settings select `WS-2026` for new mail and replies. For this account's manual Gmail Web send path, use `includeSignature: false`, inspect the stored draft as unsigned, and inspect the final Sent message after the operator sends. The exact downstream insertion point has not been isolated.
+An API-created draft opened in Gmail Web does not necessarily show a Gmail-added signature. In a controlled 2026-10-09 test, an unsigned Trevi API draft sent through Gmail Web arrived in Sent with **zero** signatures despite the account's `WS-2026` default for new mail and replies. Two earlier client messages arrived in Sent with two signatures; the second insertion point has not yet been isolated. For client-facing `gabriele.g@trevielite.it` drafts, keep signature HTML out of the supplied body, use `includeSignature: true`, and inspect the stored draft for exactly one signature. Only the Sent message establishes the final signature count.
 
 Set `includeSignature: true` (default `false`) on either `draft_email` or `update_draft` and the server will:
 

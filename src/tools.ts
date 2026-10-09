@@ -4,7 +4,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 // Schema definitions
 export const GetAccountContextSchema = z.object({}).strict();
 
-const IncludeSignatureSchema = z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature and append its HTML to the MIME body. This checks only the draft/API message, not later Gmail Web or extension behavior at send time. For gabriele.g@trevielite.it drafts that the operator sends in Gmail Web, use false: pre-signed API drafts produced duplicate WiseStamp signatures in Sent on 2026-10-09. Inspect the final Sent message after manual send. Default false.");
+const IncludeSignatureSchema = z.boolean().optional().default(false).describe("When true, fetch the sender's Gmail send-as signature and append its HTML to the MIME body. For client-facing gabriele.g@trevielite.it drafts later sent in Gmail Web, use true: a controlled unsigned API draft sent through Gmail Web on 2026-10-09 had zero signatures in Sent. Keep signature HTML out of the supplied body and inspect the stored draft for exactly one. Two earlier client sends had two signatures; their second insertion point remains under investigation. Default false.");
 
 export const SendEmailSchema = z.object({
   to: z.array(z.string()).describe("List of recipient email addresses"),
