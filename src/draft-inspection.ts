@@ -151,6 +151,9 @@ export function inspectDraftPayload(
   validateAttachments(content.attachments, options.expectedAttachments, errors);
 
   const headers = payload?.headers ?? [];
+  if (required && matches === 1 && headerValue(headers, 'in-reply-to')) {
+    warnings.push('Gmail Web may hide this reply signature under Show trimmed content; reveal it and do not use Insert signature');
+  }
   validateExpectedHeaders(headers, options.expectedHeaders, errors);
   validateExpectedBody(rawText, comparableHtml, options, errors);
   const result: DraftInspection = {

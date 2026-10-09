@@ -277,6 +277,24 @@ describe('draft payload inspection', () => {
     }]);
   });
 
+  it('warns when Gmail Web may hide an existing signature in a reply draft', () => {
+    const signatureHtml = '<table data-wisestamp="1"><tr><td>Unique Signature Text</td></tr></table>';
+    const reply = fixture({ html: `<p>One</p><p>Two</p>${signatureHtml}` });
+    reply.message!.payload!.headers!.push({ name: 'In-Reply-To', value: '<original@example.com>' });
+
+    const result = inspectDraftPayload(reply, { requireSignature: true }, signatureHtml);
+    const standalone = inspectDraftPayload(
+      fixture({ html: `<p>One</p><p>Two</p>${signatureHtml}` }),
+      { requireSignature: true },
+      signatureHtml,
+    );
+
+    expect(result.verdict).toBe('READY');
+    expect(result.signature.matches).toBe(1);
+    expect(result.warnings).toContain('Gmail Web may hide this reply signature under Show trimmed content; reveal it and do not use Insert signature');
+    expect(standalone.warnings).not.toContain('Gmail Web may hide this reply signature under Show trimmed content; reveal it and do not use Insert signature');
+  });
+
   it('rejects wrong recipients and subject without echoing private header values', () => {
     const actualRecipient = 'actual-private@example.com';
     const expectedRecipient = 'expected-private@example.com';
